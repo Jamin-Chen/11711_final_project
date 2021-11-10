@@ -4,7 +4,7 @@ import pickle
 import time
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import h5py as h5
 import numpy as np
@@ -19,6 +19,7 @@ from tqdm import tqdm
 
 from data import ComicsDataset, ComicPanelBatch
 from models.lstm import TextOnlyHeirarchicalLSTM
+from models.transformer_baselines import TextOnlyTransformerBaseline
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -34,36 +35,46 @@ def collate_fn(batches_and_labels: List[List[Tuple[ComicPanelBatch, torch.Tensor
 
 
 def train_one_epoch(
-    model: nn.Module, dataloader: DataLoader, optimizer: torch.optim.Optimizer
+    model: nn.Module,
+    dataloader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    pbar_total: int,
+    pbar_step: int,
+    pbar_desc: str,
 ):
     model.train()
 
     total_loss = 0
     n_examples = 0
 
-    # NOTE: It's hard to get tqdm working for the training page/batch count, mainly
-    # because we don't know how many examples total there are, and how many pages
-    # and panels will be valid.
-    for batches in dataloader:
-        for batch, labels in batches:
-            batch.to(device)
-            labels = labels.to(device)
+    with tqdm(leave=False, total=pbar_total, desc=pbar_desc) as pbar:
+        for batches in dataloader:
+            for batch, labels in batches:
+                batch.to(device)
+                labels = labels.to(device)
 
-            logits = model(batch)
-            loss = F.cross_entropy(logits, labels)
+                logits = model(batch)
+                loss = F.cross_entropy(logits, labels)
 
-            total_loss += loss.item()
-            n_examples += batch.batch_size
+                total_loss += loss.item()
+                n_examples += batch.batch_size
 
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+            pbar.update(pbar_step)
 
     avg_loss = total_loss / n_examples
     return avg_loss
 
 
-def eval_one_epoch(model: nn.Module, dataloader: DataLoader):
+def eval_one_epoch(
+    model: nn.Module,
+    dataloader: DataLoader,
+    pbar_total: int,
+    pbar_step: int,
+    pbar_desc: str,
+):
     model.eval()
 
     with torch.no_grad():
@@ -71,20 +82,23 @@ def eval_one_epoch(model: nn.Module, dataloader: DataLoader):
         n_examples = 0
         all_preds = []
         all_labels = []
-        for batches in dataloader:
-            for batch, labels in batches:
-                batch.to(device)
-                labels = labels.to(device)
-                
-                logits = model(batch)
-                loss = F.cross_entropy(logits, labels)
 
-                preds = torch.argmax(logits, dim=-1)
-                all_preds.append(preds)
-                all_labels.append(labels)
+        with tqdm(leave=False, total=pbar_total, desc=pbar_desc) as pbar:
+            for batches in dataloader:
+                for batch, labels in batches:
+                    batch.to(device)
+                    labels = labels.to(device)
 
-                total_loss += loss.item()
-                n_examples += batch.batch_size
+                    logits = model(batch)
+                    loss = F.cross_entropy(logits, labels)
+
+                    preds = torch.argmax(logits, dim=-1)
+                    all_preds.append(preds)
+                    all_labels.append(labels)
+
+                    total_loss += loss.item()
+                    n_examples += batch.batch_size
+                pbar.update(pbar_step)
 
         avg_loss = total_loss / n_examples
 
@@ -135,7 +149,7 @@ def main(
     vgg_feats_path: str = '../comics/data/vgg_features.h5',
     vocab_path: str = '../comics/data/comics_vocab.p',
     folds_dir: str = '../comics/folds',
-    difficulty: str = 'hard',
+    difficulty: str = 'easy',
     n_epochs: int = 10,
     megabatch_size: int = 512,
     batch_size: int = 64,
@@ -148,7 +162,7 @@ def main(
     # NOTE: Need to pass latin1 as the encoding scheme here, there seems to be some
     # incompability between python 2/3 pickle. For more info see:
     # https://stackoverflow.com/questions/11305790/pickle-incompatibility-of-numpy-arrays-between-python-2-and-3
-    word_to_idx, idx_to_word = pickle.load(open(vocab_path, 'rb'), encoding='latin1')
+    word_to_idx, idx_to_word = pickle.load(open(vocab_path, 'rb'), encoding='bytes')
 
     data_kwargs = {
         'comics_data_path': comics_data_path,
@@ -164,11 +178,16 @@ def main(
     valid_dataloader, valid_dataset = make_dataloader(**data_kwargs, fold='dev')
     test_dataloader, test_dataset = make_dataloader(**data_kwargs, fold='test')
 
+    n_train_pages = len(train_dataset)
+    n_valid_pages = len(valid_dataset)
+    n_test_pages = len(test_dataset)
+
     # Predefined parameters.
     # total_pages, max_panels, max_boxes, max_words = train_data.words.shape
     vocab_len = len(word_to_idx)
 
-    model = TextOnlyHeirarchicalLSTM(vocab_len=vocab_len)
+    # model = TextOnlyTransformerBaseline(idx_to_word)
+    model = TextOnlyHeirarchicalLSTM(vocab_len)
     model.to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=lr)
@@ -176,20 +195,40 @@ def main(
     for epoch in tqdm(range(n_epochs), desc='epochs', disable=not show_tqdm):
         start = time.time()
 
-        train_loss = train_one_epoch(model, train_dataloader, optimizer)
-        valid_loss, valid_acc, _, _ = eval_one_epoch(model, valid_dataloader)
+        train_loss = train_one_epoch(
+            model,
+            train_dataloader,
+            optimizer,
+            pbar_total=n_train_pages,
+            pbar_step=megabatch_size,
+            pbar_desc='Train pages',
+        )
+        valid_loss, valid_acc, _, _ = eval_one_epoch(
+            model,
+            valid_dataloader,
+            pbar_total=n_valid_pages,
+            pbar_step=megabatch_size,
+            pbar_desc='Valid. pages',
+        )
+        test_loss, test_acc, test_preds, test_labels = eval_one_epoch(
+            model,
+            test_dataloader,
+            pbar_total=n_test_pages,
+            pbar_step=megabatch_size,
+            pbar_desc='Test Pages',
+        )
 
         end = time.time()
         duration = str(timedelta(seconds=end - start)).split('.')[0]
 
         print(
-            f'Epoch {epoch}: {train_loss=:.4f}, {valid_loss=:.4f}, {valid_acc=:.4f}. Took {duration}s.'
+            f'Epoch {epoch}: {train_loss=:.4f}, {valid_loss=:.4f}, {valid_acc=:.4f}, {test_loss=:.4f}, {test_acc=:.4f}. Took {duration}s.'
         )
 
-    test_loss, test_acc, test_preds, test_labels = eval_one_epoch(
-        model, test_dataloader
-    )
-    print(f'{test_loss=:.4f}, {test_acc=:.4f}')
+    # test_loss, test_acc, test_preds, test_labels = eval_one_epoch(
+    #     model, test_dataloader
+    # )
+    # print(f'{test_loss=:.4f}, {test_acc=:.4f}')
 
 
 if __name__ == '__main__':

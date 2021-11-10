@@ -11,6 +11,9 @@ import torch
 from torch.utils.data import Dataset
 
 
+torch.multiprocessing.set_sharing_strategy('file_system')
+
+
 @dataclass
 class ComicPanelBatch:
     """
@@ -47,6 +50,10 @@ class ComicPanelBatch:
     answer_words : torch.Tensor, shape (batch_size, n_answers, n_words_max)
 
     answer_words_masks : torch.Tensor, shape (batch_size, n_answers, n_words_max)
+
+    context_box_text : list of strings, length (batch_size * n_context * n_boxes_max)
+
+    answer_text : list of strings, length (batch_size * n_answers)
     """
 
     answer_ids: torch.Tensor
@@ -59,6 +66,8 @@ class ComicPanelBatch:
     answer_bounding_boxes: torch.Tensor
     answer_words: torch.Tensor
     answer_word_masks: torch.Tensor
+    context_box_text: np.ndarray
+    answer_text: np.ndarray
 
     def to(self, device: str) -> None:
         for attr, value in self.__dict__.items():
@@ -95,23 +104,20 @@ class ComicsDataset(Dataset):
         # incompability between python 2/3 pickle. However this means that all strings
         # will be bytestrings, so we need to decode afterwards. For more info see:
         # https://stackoverflow.com/questions/46001958/typeerror-a-bytes-like-object-is-required-not-str-when-opening-python-2-pick/47814305#47814305
-        word_to_idx, idx_to_word = pickle.load(
-            open(vocab_path, 'rb'), encoding='bytes'
-        )
-        self.word_to_idx = {k.decode('utf-8') :v for k, v in word_to_idx.items()}
+        word_to_idx, idx_to_word = pickle.load(open(vocab_path, 'rb'), encoding='bytes')
+        self.word_to_idx = {k.decode('utf-8'): v for k, v in word_to_idx.items()}
         self.idx_to_word = {k: v.decode('utf-8') for k, v in idx_to_word.items()}
 
         with h5.File(self.comics_data_path, 'r') as comics_data:
             words = comics_data[self.fold]['words']
             self.n_pages = words.shape[0]
-        
+
         self.fold_dict = None
         if fold in ('dev', 'test'):
             self.fold_dict = read_fold(
-                os.path.join(folds_dir, f'text_cloze_dev_{difficulty}.csv'),
+                os.path.join(folds_dir, f'text_cloze_{fold}_{difficulty}.csv'),
                 vdict=self.word_to_idx,
             )
-            
 
     def __getitem__(self, indices: Iterable[int]) -> List[ComicPanelBatch]:
         # NOTE: We need to open the hdf5 file inside here in order to ensure thread
@@ -131,10 +137,12 @@ class ComicsDataset(Dataset):
                 words=fold_data['words'],
                 word_mask=fold_data['word_mask'],
                 comics_fc7=fold_vgg_feats['vgg_features'],
+                raw_text=fold_data['raw_text'],
                 vdict=self.word_to_idx,
                 mb_start=indices[0],
                 mb_end=indices[-1] + 1,
                 batch_size=self.batch_size,
+                max_unk=30 if self.fold == 'train' else 2,
                 difficulty=self.difficulty,
                 fold_dict=self.fold_dict,
             )
@@ -153,21 +161,24 @@ def read_fold(csv_file, vdict, max_len=30):
 
     This function was copied from the original author's code.
     """
-    reader = csv.DictReader(open(csv_file, 'r'))
-    fold_dict = {}
-    for row in reader:
-        key = '%s_%s_%s' % (row['book_id'], row['page_id'], row['answer_panel_id'])
-        fold_dict[key] = []
-        candidates = np.zeros((3, max_len)).astype('int32')
-        candidate_masks = np.zeros((3, max_len)).astype('float32')
-        label = [0,0,0]
-        label[int(row['correct_answer'])] = 1
-        for i in range(3):
-            c = row['answer_candidate_%d_text' % i].split()
-            candidates[i,:len(c)] = [vdict[w] for w in c]
-            candidate_masks[i, :len(c)] = 1.
+    with open(csv_file, 'r') as f:
+        reader = csv.DictReader(f)
+        fold_dict = {}
+        for row in reader:
+            key = '%s_%s_%s' % (row['book_id'], row['page_id'], row['answer_panel_id'])
+            fold_dict[key] = []
+            candidates = np.zeros((3, max_len)).astype('int32')
+            candidate_masks = np.zeros((3, max_len)).astype('float32')
+            candidate_text = np.zeros(3, dtype=object)
+            label = [0, 0, 0]
+            label[int(row['correct_answer'])] = 1
+            for i in range(3):
+                c = row['answer_candidate_%d_text' % i].split()
+                candidates[i, : len(c)] = [vdict[w] for w in c]
+                candidate_masks[i, : len(c)] = 1.0
+                candidate_text[i] = row[f'answer_candidate_{i}_text'].encode('utf-8')
 
-        fold_dict[key] = [candidates, candidate_masks, label]
+            fold_dict[key] = [candidates, candidate_masks, candidate_text, label]
 
     return fold_dict
 
@@ -181,6 +192,7 @@ def generate_minibatches_from_megabatch_text_cloze(
     words,
     word_mask,
     comics_fc7,
+    raw_text,
     vdict,
     mb_start,
     mb_end,
@@ -198,7 +210,8 @@ def generate_minibatches_from_megabatch_text_cloze(
     """
     Takes a "megabatch" (multiple pages of comics) and generates a bunch of minibatches.
 
-    This function was mostly copied from the original authors' code.
+    This function was originally copied from the original authors' code, but then
+    modified to suit our needs.
     """
     curr_fc7 = comics_fc7[mb_start:mb_end]
 
@@ -212,6 +225,7 @@ def generate_minibatches_from_megabatch_text_cloze(
     curr_book_ids = book_ids[mb_start:mb_end]
     curr_page_ids = page_ids[mb_start:mb_end]
     curr_imasks = img_mask[mb_start:mb_end]
+    curr_raw_text = raw_text[mb_start:mb_end]
 
     num_panels = np.sum(curr_imasks, axis=-1).astype('int32')
 
@@ -240,6 +254,8 @@ def generate_minibatches_from_megabatch_text_cloze(
     answer_bboxes = []
     answer_bmask = []
     candidates = []
+    context_raw_text = []
+    a_txt = []
 
     iter_end = num_panels.shape[0] - 1
     for i in range(0, iter_end):
@@ -281,11 +297,17 @@ def generate_minibatches_from_megabatch_text_cloze(
             if too_many_unks:
                 continue
 
+            # Context information.
             context_fc7.append(curr_fc7[i, j : j + context_size])
             context_bboxes.append(curr_bboxes[i, j : j + context_size])
             context_bmask.append(curr_bmask[i, j : j + context_size])
             context_words.append(curr_words[i, j : j + context_size])
             context_wmask.append(curr_wmask[i, j : j + context_size])
+
+            # I (Jamin) added:
+            context_raw_text.append(curr_raw_text[i, j : j + context_size])
+
+            # Answer information.
             key = (curr_book_ids[i], curr_page_ids[i], j + context_size)
             answer_ids.append(key)
             answer_fc7.append(curr_fc7[i, j + context_size])
@@ -293,8 +315,8 @@ def generate_minibatches_from_megabatch_text_cloze(
 
             # if cached fold, just use the stored candidates
             key = '_'.join([str(z) for z in key])
-            # if fold_dict and key in fold_dict:
-            if False:
+            if fold_dict and key in fold_dict:
+                # if False:
                 candidates.append(fold_dict[key])
 
             # otherwise randomly sample candidates (for training)
@@ -304,6 +326,7 @@ def generate_minibatches_from_megabatch_text_cloze(
                 if difficulty == 'hard':
                     text_candidates = np.zeros((3, curr_words.shape[-1]))
                     mask_candidates = np.zeros((3, curr_words.shape[-1]))
+                    raw_text_candidates = np.zeros(3, dtype=object)
 
                     # see if any panels in the surrounding pages have long enough text boxes
                     window_start = max(0, i - window_size)
@@ -340,24 +363,47 @@ def generate_minibatches_from_megabatch_text_cloze(
                     mask_candidates[0] = curr_wmask[i, j + context_size, 0]
                     mask_candidates[1] = curr_wmask[chosen_prev_candidate]
                     mask_candidates[2] = curr_wmask[chosen_next_candidate]
-                    candidates.append((text_candidates, mask_candidates, [1, 0, 0]))
+
+                    # I (Jamin) added:
+                    raw_text_candidates[0] = curr_raw_text[i, j + context_size, 0]
+                    raw_text_candidates[1] = curr_raw_text[chosen_prev_candidate]
+                    raw_text_candidates[2] = curr_raw_text[chosen_next_candidate]
+
+                    candidates.append(
+                        (
+                            text_candidates,
+                            mask_candidates,
+                            raw_text_candidates,
+                            [1, 0, 0],
+                        )
+                    )
 
                 # candidates come from random pages in the megabatch
                 else:
                     text_candidates = np.zeros((num_candidates, curr_words.shape[-1]))
                     mask_candidates = np.zeros((num_candidates, curr_words.shape[-1]))
+                    raw_text_candidates = np.zeros(num_candidates, dtype=object)
 
                     # corr = 0, all other indices are wrong candidates
                     text_candidates[0] = curr_words[i, j + context_size, 0]
                     mask_candidates[0] = curr_wmask[i, j + context_size, 0]
+                    raw_text_candidates[0] = curr_raw_text[i, j + context_size, 0]
 
                     for cand_idx in range(num_candidates - 1):
                         coords = random.choice(pc_tuple)
 
                         text_candidates[cand_idx + 1] = curr_words[coords]
                         mask_candidates[cand_idx + 1] = curr_wmask[coords]
+                        raw_text_candidates[cand_idx + 1] = curr_raw_text[coords]
 
-                    candidates.append((text_candidates, mask_candidates, [1, 0, 0]))
+                    candidates.append(
+                        (
+                            text_candidates,
+                            mask_candidates,
+                            raw_text_candidates,
+                            [1, 0, 0],
+                        )
+                    )
 
     # create numpy-ized minibatches
     batch_inds = [(x, x + batch_size) for x in range(0, len(candidates), batch_size)]
@@ -373,19 +419,23 @@ def generate_minibatches_from_megabatch_text_cloze(
         c_wm = np.array(context_wmask[start:end]).astype('float32')
         a_fc7 = np.array(answer_fc7[start:end])
         a_bb = np.array(answer_bboxes[start:end]).astype('float32')
+        c_txt = np.array(context_raw_text[start:end])
 
         a_w = []
         a_wm = []
         labels = []
+        a_txt = []
 
         for cand in candidates[start:end]:
             a_w.append(cand[0])
             a_wm.append(cand[1])
-            labels.append(cand[2])
+            a_txt.append(cand[2])
+            labels.append(cand[3])
 
         a_w = np.array(a_w).astype('int32')
         a_wm = np.array(a_wm).astype('float32')
         labels = np.array(labels).astype('int32')
+        a_txt = np.array(a_txt)
 
         if shuffle_candidates and not fold_dict:
             for idx in range(a_w.shape[0]):
@@ -393,6 +443,18 @@ def generate_minibatches_from_megabatch_text_cloze(
                 a_w[idx] = a_w[idx, p]
                 a_wm[idx] = a_wm[idx, p]
                 labels[idx] = labels[idx, p]
+                a_txt[idx] = a_txt[idx, p]
+
+        # Convert from bytestrings to strings.
+        for indices, _ in np.ndenumerate(c_txt):
+            c_txt[indices] = c_txt[indices].decode('utf-8')
+
+        for indices, _ in np.ndenumerate(a_txt):
+            a_txt[indices] = a_txt[indices].decode('utf-8')
+
+        # Convert raw sentences to flat lists instead of numpy arrays.
+        c_txt = c_txt.ravel().tolist()
+        a_txt = a_txt.ravel().tolist()
 
         labels = np.argmax(labels, axis=-1)
 
@@ -422,6 +484,8 @@ def generate_minibatches_from_megabatch_text_cloze(
                     answer_bounding_boxes=torch.FloatTensor(a_bb),
                     answer_words=torch.IntTensor(a_w),
                     answer_word_masks=torch.BoolTensor(a_wm),
+                    context_box_text=c_txt,
+                    answer_text=a_txt,
                 ),
                 torch.LongTensor(labels),
             )

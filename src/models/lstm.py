@@ -1,6 +1,7 @@
 import torch
+import torch.nn.functional as F
 from torch import nn
-from torch.nn.utils.rnn import pack_padded_sequence
+from torch.nn.utils.rnn import pack_padded_sequence, pad_sequence
 
 from data import ComicPanelBatch
 
@@ -28,10 +29,13 @@ class TextOnlyHeirarchicalLSTM(nn.Module):
         # Generate embeddings for each speech box by summing the embeddings of the
         # individual words.
         context_box_embeddings = torch.sum(
-            self.embedding(batch.context_words * batch.context_word_masks), dim=-2
+            self.embedding(batch.context_words)
+            * batch.context_word_masks.unsqueeze(-1),
+            dim=-2,
         )
         answer_box_embeddings = torch.sum(
-            self.embedding(batch.answer_words * batch.answer_word_masks), dim=-2
+            self.embedding(batch.answer_words) * batch.answer_word_masks.unsqueeze(-1),
+            dim=-2,
         )
 
         # Reshape tensors so that each panel is treated as an individual sequence of
@@ -58,7 +62,7 @@ class TextOnlyHeirarchicalLSTM(nn.Module):
         )
 
         # Use the final hidden state for the box-level LSTM as the panel embeddings.
-        _, (panel_embeddings, _) = self.lstm_box(context_box_embeddings_packed)
+        _, (_, panel_embeddings) = self.lstm_box(context_box_embeddings_packed)
         panel_embeddings = panel_embeddings.squeeze()
 
         # Zero out any panel embeddings that didn't contain speech boxes.
@@ -67,11 +71,11 @@ class TextOnlyHeirarchicalLSTM(nn.Module):
         # Use the final hidden state of the panel-level LSTM as the embedding for the
         # entire context.
         panel_embeddings = panel_embeddings.reshape((batch_size, n_context, -1))
-        _, (context_embeddings, _) = self.lstm_panel(panel_embeddings)
-        context_embeddings = context_embeddings.reshape(batch_size, -1, 1)
+        _, (_, context_embeddings) = self.lstm_panel(panel_embeddings)
+        context_embeddings = context_embeddings.reshape(batch_size, 1, -1)
 
         # Compute batched matrix product between each context vector and the
         # corresponding answer vectors.
-        scores = torch.bmm(answer_box_embeddings, context_embeddings)
+        scores = torch.sum(context_embeddings * answer_box_embeddings, dim=-1)
         scores = scores.reshape(batch_size, 3)
         return scores
