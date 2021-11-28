@@ -2,7 +2,7 @@ from typing import List
 
 import torch
 import torch.nn as nn
-from transformers import BertTokenizer, BertModel
+from transformers import BertTokenizer, BertModel, DistilBertTokenizer, DistilBertModel
 
 from data import ComicPanelBatch
 
@@ -11,25 +11,26 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 class TextOnlyTransformerBaseline(nn.Module):
-    def __init__(self, idx_to_word):
+    def __init__(self, idx_to_word, use_distilbert=False):
         super(TextOnlyTransformerBaseline, self).__init__()
 
         self.idx_to_word = idx_to_word
 
-        # TODO: Might be too slow if we need to train through these models as well,
-        # maybe just freeze them.
-        self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-        self.bert_model = BertModel.from_pretrained('bert-base-uncased').to(device)
+        self.use_distilbert = use_distilbert
+        if use_distilbert:
+            self.bert_tokenizer = DistilBertTokenizer.from_pretrained(
+                'distilbert-base-uncased'
+            )
+            self.bert_model = DistilBertModel.from_pretrained('distilbert-base-uncased')
+        else:
+            self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+            self.bert_model = BertModel.from_pretrained('bert-base-uncased').to(device)
 
-        self.lstm_panel = nn.LSTM(
-            input_size=768,
-            hidden_size=768,
-            batch_first=True,
-        )
+        self.lstm_panel = nn.LSTM(input_size=768, hidden_size=768, batch_first=True,)
 
-        # Freeze BERT parameters.
-        for param in self.bert_model.parameters():
-            param.requires_grad = False
+        # # Freeze BERT parameters.
+        # for param in self.bert_model.parameters():
+        #     param.requires_grad = False
 
     def forward(self, batch: ComicPanelBatch):
         # print(f'{batch.context_box_text[0] = }')
@@ -71,4 +72,9 @@ class TextOnlyTransformerBaseline(nn.Module):
                 bert_input[key] = tensor.to(device)
 
         bert_outputs = self.bert_model(**bert_input)
+
+        if self.use_distilbert:
+            return bert_outputs[0][
+                :, 0
+            ]  # Distilbert returns a tuple where the 1st thing is hidden state.
         return bert_outputs.pooler_output

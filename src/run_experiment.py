@@ -38,14 +38,18 @@ def train_one_epoch(
     model: nn.Module,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
+    scaler,
     pbar_total: int,
     pbar_step: int,
     pbar_desc: str,
+    iters_to_accumulate: int = 1,
 ):
     model.train()
 
     total_loss = 0
-    n_examples = 0
+    n_batches = 0
+
+    i = 0
 
     with tqdm(leave=False, total=pbar_total, desc=pbar_desc) as pbar:
         for batches in dataloader:
@@ -53,18 +57,29 @@ def train_one_epoch(
                 batch.to(device)
                 labels = labels.to(device)
 
-                logits = model(batch)
+                with torch.cuda.amp.autocast():
+                    logits = model(batch)
+
                 loss = F.cross_entropy(logits, labels)
+                loss /= iters_to_accumulate
 
                 total_loss += loss.item()
-                n_examples += batch.batch_size
+                n_batches += 1
 
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
+                # Accumulates scaled gradients.
+                scaler.scale(loss).backward()
+
+                i += 1
+                if i % iters_to_accumulate == 0:
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+
+                # loss.backward()
+                # optimizer.step()
             pbar.update(pbar_step)
 
-    avg_loss = total_loss / n_examples
+    avg_loss = total_loss / n_batches
     return avg_loss
 
 
@@ -79,7 +94,7 @@ def eval_one_epoch(
 
     with torch.no_grad():
         total_loss = 0
-        n_examples = 0
+        n_batches = 0
         all_preds = []
         all_labels = []
 
@@ -89,21 +104,24 @@ def eval_one_epoch(
                     batch.to(device)
                     labels = labels.to(device)
 
-                    logits = model(batch)
+                    with torch.cuda.amp.autocast():
+                        logits = model(batch)
+
                     loss = F.cross_entropy(logits, labels)
 
                     preds = torch.argmax(logits, dim=-1)
-                    all_preds.append(preds)
-                    all_labels.append(labels)
+                    all_preds.append(preds.cpu())
+                    all_labels.append(labels.cpu())
 
                     total_loss += loss.item()
-                    n_examples += batch.batch_size
+                    n_batches += 1
                 pbar.update(pbar_step)
 
-        avg_loss = total_loss / n_examples
+        avg_loss = total_loss / n_batches
 
         all_preds = torch.cat(all_preds)
         all_labels = torch.cat(all_labels)
+        n_examples = all_preds.size(0)
         acc = (torch.sum(all_preds == all_labels) / n_examples).item()
 
         return avg_loss, acc, all_preds, all_labels
@@ -145,21 +163,22 @@ def make_dataloader(
 
 
 def main(
-    comics_data_path: str = '../comics/data/comics.h5',
-    vgg_feats_path: str = '../comics/data/vgg_features.h5',
-    vocab_path: str = '../comics/data/comics_vocab.p',
-    folds_dir: str = '../comics/folds',
+    comics_data_path: str = '../11711_COMICS/data/comics.h5',
+    vgg_feats_path: str = '../11711_COMICS/data/vgg_features.h5',
+    vocab_path: str = '../11711_COMICS/data/comics_vocab.p',
+    folds_dir: str = '../11711_COMICS/folds',
     difficulty: str = 'easy',
     n_epochs: int = 10,
     megabatch_size: int = 512,
-    batch_size: int = 64,
-    num_workers: int = 7,
-    lr: float = 0.001,
+    batch_size: int = 4,
+    iters_to_accumulate: int = 16,
+    num_workers: int = 16,
+    lr: float = 5e-5,  # Small learning rate for finetuning.
     show_tqdm: bool = False,
 ):
     comics_data = h5.File(comics_data_path, 'r')
     vgg_feats = h5.File(vgg_feats_path, 'r')
-    # NOTE: Need to pass latin1 as the encoding scheme here, there seems to be some
+    # NOTE: Need to pass bytes as the encoding scheme here, there seems to be some
     # incompability between python 2/3 pickle. For more info see:
     # https://stackoverflow.com/questions/11305790/pickle-incompatibility-of-numpy-arrays-between-python-2-and-3
     word_to_idx, idx_to_word = pickle.load(open(vocab_path, 'rb'), encoding='bytes')
@@ -186,9 +205,16 @@ def main(
     # total_pages, max_panels, max_boxes, max_words = train_data.words.shape
     vocab_len = len(word_to_idx)
 
-    # model = TextOnlyTransformerBaseline(idx_to_word)
-    model = TextOnlyHeirarchicalLSTM(vocab_len)
+    model = TextOnlyTransformerBaseline(idx_to_word)
+    # model = TextOnlyHeirarchicalLSTM(vocab_len)
     model.to(device)
+
+    scaler = torch.cuda.amp.GradScaler()
+
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f'{n_params} parameters.')
+    print(f'Using an effective batch size of {batch_size * iters_to_accumulate}.')
+    print(f'Using a learning rate of {lr}.')
 
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
@@ -199,9 +225,11 @@ def main(
             model,
             train_dataloader,
             optimizer,
+            scaler,
             pbar_total=n_train_pages,
             pbar_step=megabatch_size,
             pbar_desc='Train pages',
+            iters_to_accumulate=iters_to_accumulate,
         )
         valid_loss, valid_acc, _, _ = eval_one_epoch(
             model,
