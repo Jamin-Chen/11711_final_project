@@ -49,8 +49,6 @@ def train_one_epoch(
     total_loss = 0
     n_batches = 0
 
-    i = 0
-
     with tqdm(leave=False, total=pbar_total, desc=pbar_desc) as pbar:
         for batches in dataloader:
             for batch, labels in batches:
@@ -69,8 +67,7 @@ def train_one_epoch(
                 # Accumulates scaled gradients.
                 scaler.scale(loss).backward()
 
-                i += 1
-                if i % iters_to_accumulate == 0:
+                if n_batches % iters_to_accumulate == 0:
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad()
@@ -170,8 +167,8 @@ def main(
     difficulty: str = 'easy',
     n_epochs: int = 10,
     megabatch_size: int = 512,
-    batch_size: int = 4,
-    iters_to_accumulate: int = 16,
+    batch_size: int = 16,
+    iters_to_accumulate: int = 4,
     num_workers: int = 16,
     lr: float = 5e-5,  # Small learning rate for finetuning.
     show_tqdm: bool = False,

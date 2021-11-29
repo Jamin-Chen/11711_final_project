@@ -65,7 +65,8 @@ class TextOnlyTransformerBaseline(nn.Module):
 
     def _get_bert_embeddings(self, sentences: List[str]):
         bert_input = self.bert_tokenizer(
-            sentences, return_tensors='pt', padding=True, truncation=True
+            sentences, return_tensors='pt', padding=True, truncation=True, 
+            max_length=128  # shorter sequence length to save memory
         )
         for key, tensor in bert_input.items():
             if isinstance(tensor, torch.Tensor):
