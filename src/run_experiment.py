@@ -52,8 +52,8 @@ def train_one_epoch(
     with tqdm(leave=False, total=pbar_total, desc=pbar_desc) as pbar:
         for batches in dataloader:
             for batch, labels in batches:
-                batch.to(device)
-                labels = labels.to(device)
+                batch.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
 
                 with torch.cuda.amp.autocast():
                     logits = model(batch)
@@ -98,8 +98,8 @@ def eval_one_epoch(
         with tqdm(leave=False, total=pbar_total, desc=pbar_desc) as pbar:
             for batches in dataloader:
                 for batch, labels in batches:
-                    batch.to(device)
-                    labels = labels.to(device)
+                    batch.to(device, non_blocking=True)
+                    labels = labels.to(device, non_blocking=True)
 
                     with torch.cuda.amp.autocast():
                         logits = model(batch)
@@ -134,6 +134,7 @@ def make_dataloader(
     megabatch_size: int,
     batch_size: int,
     num_workers: int,
+    pin_memory: bool,
 ):
     dataset = ComicsDataset(
         comics_data_path=comics_data_path,
@@ -154,6 +155,7 @@ def make_dataloader(
             SequentialSampler(dataset), batch_size=megabatch_size, drop_last=False
         ),
         num_workers=num_workers,
+        pin_memory=pin_memory,
     )
 
     return dataloader, dataset
@@ -170,11 +172,9 @@ def main(
     batch_size: int = 16,
     iters_to_accumulate: int = 4,
     num_workers: int = 16,
-    lr: float = 5e-5,  # Small learning rate for finetuning.
+    lr: float = 1e-6,  # Small learning rate for finetuning.
     show_tqdm: bool = False,
 ):
-    comics_data = h5.File(comics_data_path, 'r')
-    vgg_feats = h5.File(vgg_feats_path, 'r')
     # NOTE: Need to pass bytes as the encoding scheme here, there seems to be some
     # incompability between python 2/3 pickle. For more info see:
     # https://stackoverflow.com/questions/11305790/pickle-incompatibility-of-numpy-arrays-between-python-2-and-3
@@ -189,6 +189,7 @@ def main(
         'megabatch_size': megabatch_size,
         'batch_size': batch_size,
         'num_workers': num_workers,
+        'pin_memory': True,
     }
     train_dataloader, train_dataset = make_dataloader(**data_kwargs, fold='train')
     valid_dataloader, valid_dataset = make_dataloader(**data_kwargs, fold='dev')

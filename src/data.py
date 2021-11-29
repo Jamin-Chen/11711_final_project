@@ -69,10 +69,10 @@ class ComicPanelBatch:
     context_box_text: np.ndarray
     answer_text: np.ndarray
 
-    def to(self, device: str) -> None:
+    def to(self, device: str, non_blocking: bool = False) -> None:
         for attr, value in self.__dict__.items():
             if isinstance(value, torch.Tensor):
-                setattr(self, attr, value.to(device))
+                setattr(self, attr, value.to(device, non_blocking=non_blocking))
 
     @property
     def batch_size(self) -> int:

@@ -70,7 +70,7 @@ class TextOnlyTransformerBaseline(nn.Module):
         )
         for key, tensor in bert_input.items():
             if isinstance(tensor, torch.Tensor):
-                bert_input[key] = tensor.to(device)
+                bert_input[key] = tensor.to(device, non_blocking=True)
 
         bert_outputs = self.bert_model(**bert_input)
 
