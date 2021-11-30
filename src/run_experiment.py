@@ -3,7 +3,7 @@ import pickle
 import time
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import h5py as h5
 import hydra
@@ -19,8 +19,9 @@ from torch.utils.data.sampler import BatchSampler, SequentialSampler
 from tqdm import tqdm
 
 from config import ExperimentConfig
-from data import ComicsDataset, TextClozeBatch
-from models.lstm import TextOnlyHeirarchicalLSTM
+from data.core import ComicsDataset
+from data.text_cloze import generate_minibatches_from_megabatch_text_cloze, TextClozeBatch
+# from models.lstm import TextOnlyHeirarchicalLSTM
 from models.transformer_baselines import TextOnlyTextClozeTransformerBaseline
 
 
@@ -126,7 +127,9 @@ def eval_one_epoch(
         return avg_loss, acc, all_preds, all_labels
 
 
+# TODO: Clean this code up and move into data/core.py.
 def make_dataloader(
+    batch_gen_fn: Callable,
     comics_data_path: str,
     vgg_feats_path: str,
     vocab_path: str,
@@ -137,9 +140,10 @@ def make_dataloader(
     batch_size: int,
     num_workers: int,
     pin_memory: bool,
-    load_image_feats: bool,
+    load_image_feats: bool = False,
 ):
     dataset = ComicsDataset(
+        batch_gen_fn=batch_gen_fn,
         comics_data_path=comics_data_path,
         vgg_feats_path=vgg_feats_path,
         vocab_path=vocab_path,
@@ -182,7 +186,13 @@ def main(config: ExperimentConfig):
         open(config.data.vocab_path, 'rb'), encoding='bytes'
     )
 
+    if model_name == 'text_only_text_cloze':
+        batch_gen_fn = generate_minibatches_from_megabatch_text_cloze
+    else:
+        raise ValueError(f'Unsupported model name: {model_name}.')
+
     data_kwargs = {
+        'batch_gen_fn': batch_gen_fn,
         **config.data,
         'difficulty': config.task.difficulty,
         'batch_size': config.model.batch_size,
@@ -251,11 +261,6 @@ def main(config: ExperimentConfig):
         print(
             f'Epoch {epoch}: {train_loss=:.4f}, {valid_loss=:.4f}, {valid_acc=:.4f}, {test_loss=:.4f}, {test_acc=:.4f}. Took {duration}s.'
         )
-
-    # test_loss, test_acc, test_preds, test_labels = eval_one_epoch(
-    #     model, test_dataloader
-    # )
-    # print(f'{test_loss=:.4f}, {test_acc=:.4f}')
 
 
 if __name__ == '__main__':

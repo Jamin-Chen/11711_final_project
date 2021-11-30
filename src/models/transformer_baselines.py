@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from transformers import BertTokenizer, BertModel, DistilBertTokenizer, DistilBertModel
 
-from data import TextClozeBatch
+from data.text_cloze import TextClozeBatch
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -33,8 +33,6 @@ class TextOnlyTextClozeTransformerBaseline(nn.Module):
         )
 
     def forward(self, batch: TextClozeBatch):
-        print(f'{batch.context_panel_images.shape = }')
-
         batch_size = batch.batch_size
         n_context = batch.n_context
 
