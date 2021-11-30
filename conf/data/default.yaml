@@ -1,0 +1,8 @@
+---
+comics_data_path: '../11711_COMICS/data/comics.h5'
+vgg_feats_path: '../11711_COMICS/data/vgg_features.h5'
+vocab_path: '../11711_COMICS/data/comics_vocab.p'
+folds_dir: '../11711_COMICS/folds'
+megabatch_size: 512
+num_workers: 16
+pin_memory: true

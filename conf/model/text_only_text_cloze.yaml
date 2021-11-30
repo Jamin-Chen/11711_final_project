@@ -1,0 +1,4 @@
+n_epochs: 10
+batch_size: 32
+iters_to_accumulate: 2
+lr: 1.0e-5

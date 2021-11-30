@@ -26,7 +26,11 @@ class TextOnlyTransformerBaseline(nn.Module):
             self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
             self.bert_model = BertModel.from_pretrained('bert-base-uncased').to(device)
 
-        self.lstm_panel = nn.LSTM(input_size=768, hidden_size=768, batch_first=True,)
+        self.lstm_panel = nn.LSTM(
+            input_size=768,
+            hidden_size=768,
+            batch_first=True,
+        )
 
         # # Freeze BERT parameters.
         # for param in self.bert_model.parameters():
@@ -65,8 +69,11 @@ class TextOnlyTransformerBaseline(nn.Module):
 
     def _get_bert_embeddings(self, sentences: List[str]):
         bert_input = self.bert_tokenizer(
-            sentences, return_tensors='pt', padding=True, truncation=True, 
-            max_length=128  # shorter sequence length to save memory
+            sentences,
+            return_tensors='pt',
+            padding=True,
+            truncation=True,
+            max_length=128,  # shorter sequence length to save memory
         )
         for key, tensor in bert_input.items():
             if isinstance(tensor, torch.Tensor):

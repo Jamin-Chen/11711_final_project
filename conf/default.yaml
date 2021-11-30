@@ -1,0 +1,12 @@
+---
+defaults:
+ - data: default
+ - task: default
+ - override hydra/job_logging: disabled
+
+
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+model: ???
