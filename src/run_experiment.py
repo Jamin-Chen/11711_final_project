@@ -137,6 +137,7 @@ def make_dataloader(
     batch_size: int,
     num_workers: int,
     pin_memory: bool,
+    load_image_feats: bool,
 ):
     dataset = ComicsDataset(
         comics_data_path=comics_data_path,
@@ -146,6 +147,7 @@ def make_dataloader(
         difficulty=difficulty,
         fold=fold,
         batch_size=batch_size,
+        load_image_feats=load_image_feats,
     )
 
     # We use SequentialSampler because the original code did not shuffle example order,
@@ -184,6 +186,7 @@ def main(config: ExperimentConfig):
         **config.data,
         'difficulty': config.task.difficulty,
         'batch_size': config.model.batch_size,
+        # 'load_image_feats': True,
     }
     train_dataloader, train_dataset = make_dataloader(**data_kwargs, fold='train')
     valid_dataloader, valid_dataset = make_dataloader(**data_kwargs, fold='dev')

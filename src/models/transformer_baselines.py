@@ -33,6 +33,8 @@ class TextOnlyTextClozeTransformerBaseline(nn.Module):
         )
 
     def forward(self, batch: TextClozeBatch):
+        print(f'{batch.context_panel_images.shape = }')
+
         batch_size = batch.batch_size
         n_context = batch.n_context
 

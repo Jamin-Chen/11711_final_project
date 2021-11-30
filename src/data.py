@@ -66,6 +66,7 @@ class ComicsDataset(Dataset):
         difficulty: str,
         fold: str,
         batch_size: int,
+        load_image_feats: bool,
     ):
         assert fold in ('train', 'dev', 'test')
         self.comics_data_path = comics_data_path
@@ -75,6 +76,7 @@ class ComicsDataset(Dataset):
         self.difficulty = difficulty
         self.fold = fold
         self.batch_size = batch_size
+        self.load_image_feats = load_image_feats
 
         # NOTE: Need to pass bytes as the encoding scheme here, there seems to be some
         # incompability between python 2/3 pickle. However this means that all strings
@@ -110,6 +112,7 @@ class ComicsDataset(Dataset):
                 max_unk=30 if self.fold == 'train' else 2,
                 difficulty=self.difficulty,
                 fold_dict=self.fold_dict,
+                load_image_feats=self.load_image_feats,
             )
 
             return batches
@@ -168,6 +171,7 @@ def generate_minibatches_from_megabatch_text_cloze(
     only_singleton_panels=True,
     fold_dict=None,
     shuffle_candidates=True,
+    load_image_feats=False,
 ) -> List[TextClozeBatch]:
     """
     Takes a "megabatch" (multiple pages of comics) and generates a bunch of minibatches.
@@ -176,7 +180,8 @@ def generate_minibatches_from_megabatch_text_cloze(
     modified to suit our needs.
     """
     # Read in the fold data.
-    images = fold_data['images']
+    if load_image_feats:
+        images = fold_data['images']
     image_masks = fold_data['panel_mask']
     book_ids = fold_data['book_ids']
     page_ids = fold_data['page_ids']
@@ -212,9 +217,9 @@ def generate_minibatches_from_megabatch_text_cloze(
     pc_tuple = tuple(possible_candidates)
 
     # loop through each page, create as many training examples as possible
-    answer_images = []
-    candidates = []
     context_raw_text = []
+    context_images = []
+    candidates = []
     a_txt = []
 
     iter_end = num_panels.shape[0] - 1
@@ -231,10 +236,6 @@ def generate_minibatches_from_megabatch_text_cloze(
             or curr_page_ids[i + 1] != curr_page_ids[i] + 1
         ):
             continue
-
-        # subtract 1 because random.randint is inclusive
-        prev_np = num_panels[i - 1] - 1
-        next_np = num_panels[i + 1] - 1
 
         num_examples = curr_np - context_size
         for j in range(num_examples):
@@ -259,10 +260,11 @@ def generate_minibatches_from_megabatch_text_cloze(
 
             # I (Jamin) added:
             context_raw_text.append(curr_raw_text[i, j : j + context_size])
+            if load_image_feats:
+                context_images.append(curr_images[i, j : j + context_size])
 
             # Answer information.
             key = (curr_book_ids[i], curr_page_ids[i], j + context_size)
-            answer_images.append(curr_images[i, j + context_size])
 
             # if cached fold, just use the stored candidates
             key = '_'.join([str(z) for z in key])
@@ -361,6 +363,10 @@ def generate_minibatches_from_megabatch_text_cloze(
 
     all_batch_data = []
     for start, end in batch_inds:
+        context_panel_images = None
+        if load_image_feats:
+            context_panel_images = np.array(context_images[start:end])
+
         c_txt = np.array(context_raw_text[start:end])
 
         a_w = []
@@ -409,14 +415,14 @@ def generate_minibatches_from_megabatch_text_cloze(
         true_batch_size = min(end, len(candidates)) - start
         assert len(context_panel_text) == true_batch_size * context_size
         assert len(answer_panel_text) == true_batch_size * 3
-        # if self.context_panel_images is not None:
-        #     assert self.context_panel_images.shape == (
-        #         self.batch_size,
-        #         self.n_context,
-        #         224,
-        #         224,
-        #         3,
-        #     )
+        if context_panel_images is not None:
+            assert context_panel_images.shape == (
+                true_batch_size,
+                context_size,
+                224,
+                224,
+                3,
+            )
 
         # Encode text as BERT tokens (this step is CPU bound).
         # TODO: Should probably pass this stuff in somehow instead of hardcoding it.
@@ -436,7 +442,7 @@ def generate_minibatches_from_megabatch_text_cloze(
             batch_size=true_batch_size,
             n_context=context_size,
             context_panel_bert_input=context_panel_bert_input,
-            context_panel_images=None,
+            context_panel_images=context_panel_images,
             answer_panel_bert_input=answer_panel_bert_input,
         )
 
