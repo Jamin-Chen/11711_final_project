@@ -171,6 +171,7 @@ def main(config: ExperimentConfig):
     n_epochs = config.model.n_epochs
     lr = config.model.lr
     iters_to_accumulate = config.model.iters_to_accumulate
+    model_name = config.model.name
 
     # NOTE: Need to pass bytes as the encoding scheme here, there seems to be some
     # incompability between python 2/3 pickle. For more info see:
@@ -196,7 +197,11 @@ def main(config: ExperimentConfig):
     # total_pages, max_panels, max_boxes, max_words = train_data.words.shape
     vocab_len = len(word_to_idx)
 
-    model = TextOnlyTransformerBaseline(idx_to_word)
+    if model_name == 'text_only_text_cloze':
+        model = TextOnlyTransformerBaseline(idx_to_word)
+    else:
+        raise ValueError(f'Unsupported model name: {model_name}.')
+
     # model = TextOnlyHeirarchicalLSTM(vocab_len)
     model.to(device)
 

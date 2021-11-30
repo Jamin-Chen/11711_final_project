@@ -14,15 +14,16 @@ class DataConfig:
 
 @dataclass
 class TaskConfig:
-    difficulty: str = 'easy'
+    difficulty: str
 
 
 @dataclass
 class ModelConfig:
-    n_epochs: int = (10,)
-    batch_size: int = (32,)
-    iters_to_accumulate: int = (2,)
-    lr: float = (1e-5,)
+    name: str
+    n_epochs: int
+    batch_size: int
+    iters_to_accumulate: int
+    lr: float
 
 
 @dataclass
