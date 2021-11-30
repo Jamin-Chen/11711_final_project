@@ -3,7 +3,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_sequence
 
-from data import ComicPanelBatch
+from data import TextClozeBatch
 
 
 class TextOnlyHeirarchicalLSTM(nn.Module):
@@ -23,7 +23,7 @@ class TextOnlyHeirarchicalLSTM(nn.Module):
             batch_first=True,
         )
 
-    def forward(self, batch: ComicPanelBatch):
+    def forward(self, batch: TextClozeBatch):
         batch_size, n_context, n_boxes_max, n_words_max = batch.context_words.shape
 
         # Generate embeddings for each speech box by summing the embeddings of the

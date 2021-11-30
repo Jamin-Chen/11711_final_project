@@ -1,21 +1,26 @@
 import csv
+from functools import partial
 import os
 import pickle
 import random
 from dataclasses import dataclass
-from typing import Iterable, List
+from typing import Dict, Iterable, List, Optional
 
 import h5py as h5
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from transformers import BertTokenizer
 
 
 torch.multiprocessing.set_sharing_strategy('file_system')
 
 
+# TODO: Probably safe to remove the bounding box features, those aren't used anyways.
+
+
 @dataclass
-class ComicPanelBatch:
+class TextClozeBatch:
     """
     Batch of examples from the COMICS dataset.
 
@@ -29,54 +34,25 @@ class ComicPanelBatch:
 
     Attributes
     ----------
-    answer_ids : torch.Tensor, shape (batch_size, n_answers)
+    context_box_text : List[str], length (batch_size * n_context)
+        Each element in the list will contain the text for all of the text boxes in that
+        panel, joined into a single string.
 
-    context_vgg_feats : torch.Tensor, shape (batch_size, n_context, n_dim_vgg_fc7)
+    context_images : shape (batch_size, n_context, 224, 224, 3)
 
-    context_bounding_boxes: torch.Tensor, shape (batch_size, n_context, n_boxes_max, 4)
-
-    context_box_masks : torch.Tensor, shape (batch_size, n_context, n_boxes_max)
-        Mask will be 1 if the ith speech bubble exists in the panel.
-
-    context_words : torch.Tensor, shape (batch_size, n_context, n_boxes_max, n_words_max)
-
-    context_word_masks : torch.Tensor, shape (batch_size, n_context, n_boxes_max, n_words_max)
-        Mask will be 1 if the ith word exists in the speech.
-
-    answer_vgg_feats : torch.Tensor, shape (batch_size, n_dim_vgg_fc7)
-
-    answer_bounding_boxes : torch.Tensor, shape (batch_size, 4)
-
-    answer_words : torch.Tensor, shape (batch_size, n_answers, n_words_max)
-
-    answer_words_masks : torch.Tensor, shape (batch_size, n_answers, n_words_max)
-
-    context_box_text : list of strings, length (batch_size * n_context * n_boxes_max)
-
-    answer_text : list of strings, length (batch_size * n_answers)
+    answer_text : List[str], length (batch_size * n_answers)
     """
 
-    answer_ids: torch.Tensor
-    context_vgg_feats: torch.Tensor
-    context_bounding_boxes: torch.Tensor
-    context_box_masks: torch.Tensor
-    context_words: torch.Tensor
-    context_word_masks: torch.Tensor
-    answer_vgg_feats: torch.Tensor
-    answer_bounding_boxes: torch.Tensor
-    answer_words: torch.Tensor
-    answer_word_masks: torch.Tensor
-    context_box_text: np.ndarray
-    answer_text: np.ndarray
+    batch_size: int
+    n_context: int
+    context_panel_bert_input: Dict
+    context_panel_images: Optional[torch.Tensor]
+    answer_panel_bert_input: Dict
 
     def to(self, device: str, non_blocking: bool = False) -> None:
         for attr, value in self.__dict__.items():
             if isinstance(value, torch.Tensor):
                 setattr(self, attr, value.to(device, non_blocking=non_blocking))
-
-    @property
-    def batch_size(self) -> int:
-        return self.answer_ids.size(0)
 
 
 # TODO: Pass fold_dict through here.
@@ -119,25 +95,14 @@ class ComicsDataset(Dataset):
                 vdict=self.word_to_idx,
             )
 
-    def __getitem__(self, indices: Iterable[int]) -> List[ComicPanelBatch]:
+    def __getitem__(self, indices: Iterable[int]) -> List[TextClozeBatch]:
         # NOTE: We need to open the hdf5 file inside here in order to ensure thread
         # safety when num_workers > 0.
-        with h5.File(self.comics_data_path, 'r') as comics_data, h5.File(
-            self.vgg_feats_path, 'r'
-        ) as vgg_feats:
+        with h5.File(self.comics_data_path, 'r') as comics_data:
             fold_data = comics_data[self.fold]
-            fold_vgg_feats = vgg_feats[self.fold]
 
             batches = generate_minibatches_from_megabatch_text_cloze(
-                img_mask=fold_data['panel_mask'],
-                book_ids=fold_data['book_ids'],
-                page_ids=fold_data['page_ids'],
-                bboxes=fold_data['bbox'],
-                bbox_mask=fold_data['bbox_mask'],
-                words=fold_data['words'],
-                word_mask=fold_data['word_mask'],
-                comics_fc7=fold_vgg_feats['vgg_features'],
-                raw_text=fold_data['raw_text'],
+                fold_data,
                 vdict=self.word_to_idx,
                 mb_start=indices[0],
                 mb_end=indices[-1] + 1,
@@ -183,16 +148,13 @@ def read_fold(csv_file, vdict, max_len=30):
     return fold_dict
 
 
+# images already have the text boxes masked out
+# images is same shape as the raw text, so it's a 1:1 mapping
+# img_mask tells us which panels actually contain images (vs being just black)
+
+
 def generate_minibatches_from_megabatch_text_cloze(
-    img_mask,
-    book_ids,
-    page_ids,
-    bboxes,
-    bbox_mask,
-    words,
-    word_mask,
-    comics_fc7,
-    raw_text,
+    fold_data,
     vdict,
     mb_start,
     mb_end,
@@ -206,28 +168,36 @@ def generate_minibatches_from_megabatch_text_cloze(
     only_singleton_panels=True,
     fold_dict=None,
     shuffle_candidates=True,
-) -> List[ComicPanelBatch]:
+) -> List[TextClozeBatch]:
     """
     Takes a "megabatch" (multiple pages of comics) and generates a bunch of minibatches.
 
     This function was originally copied from the original authors' code, but then
     modified to suit our needs.
     """
-    curr_fc7 = comics_fc7[mb_start:mb_end]
+    # Read in the fold data.
+    images = fold_data['images']
+    image_masks = fold_data['panel_mask']
+    book_ids = fold_data['book_ids']
+    page_ids = fold_data['page_ids']
+    bbox_mask = fold_data['bbox_mask']
+    words = fold_data['words']
+    word_mask = fold_data['word_mask']
+    raw_text = fold_data['raw_text']
 
     # binarize bounding box mask (no narrative box distinction)
     curr_bmask_raw = bbox_mask[mb_start:mb_end]
     curr_bmask = np.clip(curr_bmask_raw, 0, 1)
 
-    curr_bboxes = bboxes[mb_start:mb_end] / 224.0
     curr_words = words[mb_start:mb_end]
     curr_wmask = word_mask[mb_start:mb_end]
     curr_book_ids = book_ids[mb_start:mb_end]
     curr_page_ids = page_ids[mb_start:mb_end]
-    curr_imasks = img_mask[mb_start:mb_end]
+    curr_images = images[mb_start:mb_end]
+    curr_image_masks = image_masks[mb_start:mb_end]
     curr_raw_text = raw_text[mb_start:mb_end]
 
-    num_panels = np.sum(curr_imasks, axis=-1).astype('int32')
+    num_panels = np.sum(curr_image_masks, axis=-1).astype('int32')
 
     # need to sum the number of words per box
     words_per_box = np.sum(curr_wmask, axis=-1).astype('int32')
@@ -242,17 +212,7 @@ def generate_minibatches_from_megabatch_text_cloze(
     pc_tuple = tuple(possible_candidates)
 
     # loop through each page, create as many training examples as possible
-    context_imgs = []
-    context_words = []
-    context_wmask = []
-    context_bboxes = []
-    context_bmask = []
-    context_fc7 = []
-    answer_ids = []
-    answer_imgs = []
-    answer_fc7 = []
-    answer_bboxes = []
-    answer_bmask = []
+    answer_images = []
     candidates = []
     context_raw_text = []
     a_txt = []
@@ -297,21 +257,12 @@ def generate_minibatches_from_megabatch_text_cloze(
             if too_many_unks:
                 continue
 
-            # Context information.
-            context_fc7.append(curr_fc7[i, j : j + context_size])
-            context_bboxes.append(curr_bboxes[i, j : j + context_size])
-            context_bmask.append(curr_bmask[i, j : j + context_size])
-            context_words.append(curr_words[i, j : j + context_size])
-            context_wmask.append(curr_wmask[i, j : j + context_size])
-
             # I (Jamin) added:
             context_raw_text.append(curr_raw_text[i, j : j + context_size])
 
             # Answer information.
             key = (curr_book_ids[i], curr_page_ids[i], j + context_size)
-            answer_ids.append(key)
-            answer_fc7.append(curr_fc7[i, j + context_size])
-            answer_bboxes.append(curr_bboxes[i, j + context_size][0])
+            answer_images.append(curr_images[i, j + context_size])
 
             # if cached fold, just use the stored candidates
             key = '_'.join([str(z) for z in key])
@@ -410,15 +361,6 @@ def generate_minibatches_from_megabatch_text_cloze(
 
     all_batch_data = []
     for start, end in batch_inds:
-
-        a_id = answer_ids[start:end]
-        c_fc7 = np.array(context_fc7[start:end])
-        c_bb = np.array(context_bboxes[start:end]).astype('float32')
-        c_bbm = np.array(context_bmask[start:end]).astype('float32')
-        c_w = np.array(context_words[start:end]).astype('int32')
-        c_wm = np.array(context_wmask[start:end]).astype('float32')
-        a_fc7 = np.array(answer_fc7[start:end])
-        a_bb = np.array(answer_bboxes[start:end]).astype('float32')
         c_txt = np.array(context_raw_text[start:end])
 
         a_w = []
@@ -453,42 +395,53 @@ def generate_minibatches_from_megabatch_text_cloze(
             a_txt[indices] = a_txt[indices].decode('utf-8')
 
         # Convert raw sentences to flat lists instead of numpy arrays.
-        c_txt = c_txt.ravel().tolist()
-        a_txt = a_txt.ravel().tolist()
+        context_panel_text = c_txt.ravel().tolist()
+        answer_panel_text = a_txt.ravel().tolist()
 
-        labels = np.argmax(labels, axis=-1)
-
-        batch_data = [
-            a_id,
-            c_fc7,
-            c_bb,
-            c_bbm,
-            c_w,
-            c_wm,
-            a_fc7,
-            a_bb,
-            a_w,
-            a_wm,
-            labels,
+        # Combine the text boxes within each panel into a single string.
+        context_panel_text = [
+            ' '.join(context_panel_text[i : i + 3])
+            for i in range(0, len(context_panel_text), 3)
         ]
-        all_batch_data.append(
-            (
-                ComicPanelBatch(
-                    answer_ids=torch.IntTensor(a_id),
-                    context_vgg_feats=torch.FloatTensor(c_fc7),
-                    context_bounding_boxes=torch.FloatTensor(c_bb),
-                    context_box_masks=torch.BoolTensor(c_bbm),
-                    context_words=torch.IntTensor(c_w),
-                    context_word_masks=torch.BoolTensor(c_wm),
-                    answer_vgg_feats=torch.FloatTensor(a_fc7),
-                    answer_bounding_boxes=torch.FloatTensor(a_bb),
-                    answer_words=torch.IntTensor(a_w),
-                    answer_word_masks=torch.BoolTensor(a_wm),
-                    context_box_text=c_txt,
-                    answer_text=a_txt,
-                ),
-                torch.LongTensor(labels),
-            )
+
+        # Assert shapes are correct before we encode with BERT tokenizer.
+        # The true batch size (which can be smaller).
+        true_batch_size = min(end, len(candidates)) - start
+        assert len(context_panel_text) == true_batch_size * context_size
+        assert len(answer_panel_text) == true_batch_size * 3
+        # if self.context_panel_images is not None:
+        #     assert self.context_panel_images.shape == (
+        #         self.batch_size,
+        #         self.n_context,
+        #         224,
+        #         224,
+        #         3,
+        #     )
+
+        # Encode text as BERT tokens (this step is CPU bound).
+        # TODO: Should probably pass this stuff in somehow instead of hardcoding it.
+        bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+        tokenize = partial(
+            bert_tokenizer,
+            return_tensors='pt',
+            padding=True,
+            truncation=True,
+            max_length=128,  # shorter sequence length to save memory
         )
+
+        context_panel_bert_input = tokenize(context_panel_text)
+        answer_panel_bert_input = tokenize(answer_panel_text)
+
+        batch = TextClozeBatch(
+            batch_size=true_batch_size,
+            n_context=context_size,
+            context_panel_bert_input=context_panel_bert_input,
+            context_panel_images=None,
+            answer_panel_bert_input=answer_panel_bert_input,
+        )
+
+        labels = torch.LongTensor(np.argmax(labels, axis=-1))
+
+        all_batch_data.append((batch, labels))
 
     return all_batch_data

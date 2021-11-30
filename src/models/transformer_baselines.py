@@ -1,29 +1,29 @@
-from typing import List
+from typing import Dict, List
 
 import torch
 import torch.nn as nn
 from transformers import BertTokenizer, BertModel, DistilBertTokenizer, DistilBertModel
 
-from data import ComicPanelBatch
+from data import TextClozeBatch
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-class TextOnlyTransformerBaseline(nn.Module):
+class TextOnlyTextClozeTransformerBaseline(nn.Module):
     def __init__(self, idx_to_word, use_distilbert=False):
-        super(TextOnlyTransformerBaseline, self).__init__()
+        super(TextOnlyTextClozeTransformerBaseline, self).__init__()
 
         self.idx_to_word = idx_to_word
 
         self.use_distilbert = use_distilbert
         if use_distilbert:
-            self.bert_tokenizer = DistilBertTokenizer.from_pretrained(
-                'distilbert-base-uncased'
-            )
+            # self.bert_tokenizer = DistilBertTokenizer.from_pretrained(
+            #     'distilbert-base-uncased'
+            # )
             self.bert_model = DistilBertModel.from_pretrained('distilbert-base-uncased')
         else:
-            self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+            # self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
             self.bert_model = BertModel.from_pretrained('bert-base-uncased').to(device)
 
         self.lstm_panel = nn.LSTM(
@@ -32,30 +32,15 @@ class TextOnlyTransformerBaseline(nn.Module):
             batch_first=True,
         )
 
-        # # Freeze BERT parameters.
-        # for param in self.bert_model.parameters():
-        #     param.requires_grad = False
+    def forward(self, batch: TextClozeBatch):
+        batch_size = batch.batch_size
+        n_context = batch.n_context
 
-    def forward(self, batch: ComicPanelBatch):
-        # print(f'{batch.context_box_text[0] = }')
-        # print(f'{batch.answer_text[0] = }')
-        # print(f'{batch.answer_words[0] = }')
-        # print(f'{batch.answer_word_masks[0] = }')
-        # assert False
-
-        batch_size, n_context, n_boxes_max, n_words_max = batch.context_words.shape
-
-        # Join all 3 of the text boxes in a panel into a single sentence.
-        context_box_text_joined = [
-            ' '.join(batch.context_box_text[i : i + 3])
-            for i in range(0, len(batch.context_box_text), 3)
-        ]
-
-        panel_embeddings = self._get_bert_embeddings(context_box_text_joined)
+        panel_embeddings = self._get_bert_embeddings(batch.context_panel_bert_input)
         panel_embeddings = panel_embeddings.reshape(batch_size, n_context, -1)
 
         # Answer embeddings.
-        answer_embeddings = self._get_bert_embeddings(batch.answer_text)
+        answer_embeddings = self._get_bert_embeddings(batch.answer_panel_bert_input)
         answer_embeddings = answer_embeddings.reshape(batch_size, 3, -1)
 
         _, (_, context_embeddings) = self.lstm_panel(panel_embeddings)
@@ -67,14 +52,7 @@ class TextOnlyTransformerBaseline(nn.Module):
 
         return scores
 
-    def _get_bert_embeddings(self, sentences: List[str]):
-        bert_input = self.bert_tokenizer(
-            sentences,
-            return_tensors='pt',
-            padding=True,
-            truncation=True,
-            max_length=128,  # shorter sequence length to save memory
-        )
+    def _get_bert_embeddings(self, bert_input: Dict):
         for key, tensor in bert_input.items():
             if isinstance(tensor, torch.Tensor):
                 bert_input[key] = tensor.to(device, non_blocking=True)

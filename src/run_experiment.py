@@ -19,15 +19,15 @@ from torch.utils.data.sampler import BatchSampler, SequentialSampler
 from tqdm import tqdm
 
 from config import ExperimentConfig
-from data import ComicsDataset, ComicPanelBatch
+from data import ComicsDataset, TextClozeBatch
 from models.lstm import TextOnlyHeirarchicalLSTM
-from models.transformer_baselines import TextOnlyTransformerBaseline
+from models.transformer_baselines import TextOnlyTextClozeTransformerBaseline
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-def collate_fn(batches_and_labels: List[List[Tuple[ComicPanelBatch, torch.Tensor]]]):
+def collate_fn(batches_and_labels: List[List[Tuple[TextClozeBatch, torch.Tensor]]]):
     """
     Dummy collate function to just return the single element from the list (which will
     already be a list of batches), since our dataset does the batching logic.
@@ -198,7 +198,7 @@ def main(config: ExperimentConfig):
     vocab_len = len(word_to_idx)
 
     if model_name == 'text_only_text_cloze':
-        model = TextOnlyTransformerBaseline(idx_to_word)
+        model = TextOnlyTextClozeTransformerBaseline(idx_to_word)
     else:
         raise ValueError(f'Unsupported model name: {model_name}.')
 
