@@ -96,10 +96,20 @@ class VisualClozeDataset(Dataset):
         if fold in ('dev', 'test'):
             self.fold_dict = read_fold_visual_cloze(
                 os.path.join(folds_dir, f'visual_cloze_{fold}_{difficulty}.csv'),
-                vdict=self.word_to_idx,
             )
 
+        self.bert_tokenizer = None
+        self.vit_feature_extractor = None
+
     def __getitem__(self, indices: List[int]) -> List:
+        # Load the tokenizer/extractor if it's our first time.
+        if self.bert_tokenizer is None:
+            self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+        if self.vit_feature_extractor is None:
+            self.vit_feature_extractor = ViTFeatureExtractor.from_pretrained(
+                'google/vit-base-patch16-224-in21k'
+            )
+
         # NOTE: We need to open the hdf5 file inside here in order to ensure thread
         # safety when num_workers > 0.
         with h5.File(self.comics_data_path, 'r') as comics_data:
@@ -107,6 +117,8 @@ class VisualClozeDataset(Dataset):
 
             batches = generate_minibatches_from_megabatch_visual_cloze(
                 fold_data,
+                self.bert_tokenizer,
+                self.vit_feature_extractor,
                 vdict=self.word_to_idx,
                 mb_start=indices[0],
                 mb_end=indices[-1] + 1,
@@ -123,7 +135,7 @@ class VisualClozeDataset(Dataset):
         return self.n_pages
 
 
-def read_fold_visual_cloze(csv_file, vdict, max_len=30):
+def read_fold_visual_cloze(csv_file):
     """
     Reads a CSV, extracts answer candidates and labels, and returns the result as a
     dictionary.
@@ -149,6 +161,8 @@ def read_fold_visual_cloze(csv_file, vdict, max_len=30):
 
 def generate_minibatches_from_megabatch_visual_cloze(
     fold_data,
+    bert_tokenizer,
+    vit_feature_extractor,
     vdict,
     mb_start,
     mb_end,
@@ -358,7 +372,6 @@ def generate_minibatches_from_megabatch_visual_cloze(
 
         # Encode text as BERT tokens (this step is CPU bound).
         # TODO: Should probably pass this stuff in somehow instead of hardcoding it.
-        bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         do_bert_tokenize = partial(
             bert_tokenizer,
             return_tensors='pt',
@@ -369,9 +382,6 @@ def generate_minibatches_from_megabatch_visual_cloze(
         context_panel_bert_input = do_bert_tokenize(context_panel_text)
 
         # Prepare data for vision transformer.
-        vit_feature_extractor = ViTFeatureExtractor.from_pretrained(
-            'google/vit-base-patch16-224-in21k'
-        )
         do_vit_featurize = partial(vit_feature_extractor, return_tensors='pt')
 
         # Reshape images to be shape (C, H, W) before we pass to ViT feature extractor.
