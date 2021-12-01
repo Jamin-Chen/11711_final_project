@@ -80,7 +80,7 @@ class ImageTextTextClozeTransformerBaseline(nn.Module):
         answer_embeddings = answer_embeddings.reshape(batch_size, 3, -1)
 
         # TODO: try cosine simlarity as well
-        scores = torch.bmm(answer_panel_image_embeddings, context_embeddings)
+        scores = torch.bmm(answer_embeddings, context_embeddings)
         scores = scores.reshape(batch_size, 3)
         
         return scores

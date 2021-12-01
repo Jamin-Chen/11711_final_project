@@ -1,6 +1,6 @@
 ---
 name: image_and_text_text_cloze
 n_epochs: 10
-batch_size: 8
-iters_to_accumulate: 8
+batch_size: 4
+iters_to_accumulate: 16
 lr: 1.0e-5
