@@ -3,7 +3,7 @@ import pickle
 import time
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, Union
 
 import h5py as h5
 import hydra
@@ -19,22 +19,81 @@ from torch.utils.data.sampler import BatchSampler, SequentialSampler
 from tqdm import tqdm
 
 from config import ExperimentConfig
-from data.core import ComicsDataset
-from data.text_cloze import generate_minibatches_from_megabatch_text_cloze, TextClozeBatch
+from data.text_cloze import TextClozeBatch, TextClozeDataset
+from data.visual_cloze import VisualClozeBatch, VisualClozeDataset
+
 # from models.lstm import TextOnlyHeirarchicalLSTM
-from models.transformer_baselines import TextOnlyTextClozeTransformerBaseline
+from models import (
+    TextOnlyTextClozeTransformerBaseline,
+    TextOnlyVisualClozeTransformerBaseline,
+)
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# We need this line below because each dataloader process will attempt to read from the
+# h5 file.
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 
-def collate_fn(batches_and_labels: List[List[Tuple[TextClozeBatch, torch.Tensor]]]):
+Batch = Union[TextClozeBatch, VisualClozeBatch]
+
+
+def collate_fn(batches_and_labels: List[List[Tuple[Batch, torch.Tensor]]]):
     """
     Dummy collate function to just return the single element from the list (which will
     already be a list of batches), since our dataset does the batching logic.
     """
     assert len(batches_and_labels) == 1
     return batches_and_labels[0]
+
+
+def make_dataloader(
+    model_name: str,
+    comics_data_path: str,
+    vgg_feats_path: str,
+    vocab_path: str,
+    folds_dir: str,
+    fold: str,
+    difficulty: str,
+    megabatch_size: int,
+    batch_size: int,
+    num_workers: int,
+    pin_memory: bool,
+):
+    # Names are:
+    # text_only_text_cloze
+    # image_text_text_cloze
+    # text_only_visual_cloze
+    # image_text_visual_cloze
+    dataset_cls = (
+        TextClozeDataset if model_name.endswith('text_cloze') else VisualClozeDataset
+    )
+    load_image_feats = model_name.startswith('image')
+
+    dataset = dataset_cls(
+        comics_data_path=comics_data_path,
+        vgg_feats_path=vgg_feats_path,
+        vocab_path=vocab_path,
+        folds_dir=folds_dir,
+        difficulty=difficulty,
+        fold=fold,
+        batch_size=batch_size,
+        load_image_feats=load_image_feats,
+    )
+
+    # We use SequentialSampler because the original code did not shuffle example order,
+    # and we use BatchSampler to pass multiple indices to our dataset.
+    dataloader = DataLoader(
+        dataset,
+        collate_fn=collate_fn,
+        sampler=BatchSampler(
+            SequentialSampler(dataset), batch_size=megabatch_size, drop_last=False
+        ),
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+
+    return dataloader, dataset
 
 
 def train_one_epoch(
@@ -127,48 +186,6 @@ def eval_one_epoch(
         return avg_loss, acc, all_preds, all_labels
 
 
-# TODO: Clean this code up and move into data/core.py.
-def make_dataloader(
-    batch_gen_fn: Callable,
-    comics_data_path: str,
-    vgg_feats_path: str,
-    vocab_path: str,
-    folds_dir: str,
-    fold: str,
-    difficulty: str,
-    megabatch_size: int,
-    batch_size: int,
-    num_workers: int,
-    pin_memory: bool,
-    load_image_feats: bool = False,
-):
-    dataset = ComicsDataset(
-        batch_gen_fn=batch_gen_fn,
-        comics_data_path=comics_data_path,
-        vgg_feats_path=vgg_feats_path,
-        vocab_path=vocab_path,
-        folds_dir=folds_dir,
-        difficulty=difficulty,
-        fold=fold,
-        batch_size=batch_size,
-        load_image_feats=load_image_feats,
-    )
-
-    # We use SequentialSampler because the original code did not shuffle example order,
-    # and we use BatchSampler to pass multiple indices to our dataset.
-    dataloader = DataLoader(
-        dataset,
-        collate_fn=collate_fn,
-        sampler=BatchSampler(
-            SequentialSampler(dataset), batch_size=megabatch_size, drop_last=False
-        ),
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-    )
-
-    return dataloader, dataset
-
-
 @hydra.main(config_path='../conf', config_name='default')
 def main(config: ExperimentConfig):
     print(OmegaConf.to_yaml(config))
@@ -186,17 +203,11 @@ def main(config: ExperimentConfig):
         open(config.data.vocab_path, 'rb'), encoding='bytes'
     )
 
-    if model_name == 'text_only_text_cloze':
-        batch_gen_fn = generate_minibatches_from_megabatch_text_cloze
-    else:
-        raise ValueError(f'Unsupported model name: {model_name}.')
-
     data_kwargs = {
-        'batch_gen_fn': batch_gen_fn,
+        'model_name': config.model.name,
         **config.data,
         'difficulty': config.task.difficulty,
         'batch_size': config.model.batch_size,
-        # 'load_image_feats': True,
     }
     train_dataloader, train_dataset = make_dataloader(**data_kwargs, fold='train')
     valid_dataloader, valid_dataset = make_dataloader(**data_kwargs, fold='dev')
@@ -211,9 +222,13 @@ def main(config: ExperimentConfig):
     vocab_len = len(word_to_idx)
 
     if model_name == 'text_only_text_cloze':
-        model = TextOnlyTextClozeTransformerBaseline(idx_to_word)
+        model = TextOnlyTextClozeTransformerBaseline()
+    elif model_name == 'text_only_visual_cloze':
+        model = TextOnlyVisualClozeTransformerBaseline()
     else:
         raise ValueError(f'Unsupported model name: {model_name}.')
+
+    print(f'Initialized model instance {model.__class__.__name__}')
 
     # model = TextOnlyHeirarchicalLSTM(vocab_len)
     model.to(device)
