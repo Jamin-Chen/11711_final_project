@@ -40,8 +40,8 @@ class ImageTextTextClozeTransformerBaseline(nn.Module):
             batch_first=True,
         )
         
-        input_linear = 2 * 3 * 768 # 2 layers * 3 panels n_context * 768 hidden_size
-        output_linear = 3 * 768 # 3 panels n_context * 768 hidden_size
+        input_linear = 2 * 768 # 2 layers * 3 panels n_context * 768 hidden_size
+        output_linear = 768 # 3 panels n_context * 768 hidden_size
 
         self.linear = nn.Linear(input_linear, output_linear).to(device)
 
@@ -62,14 +62,13 @@ class ImageTextTextClozeTransformerBaseline(nn.Module):
         panel_image_embeddings = panel_image_embeddings.reshape(
             batch_size, n_context, -1
         )
-
+        
         ### get combined image and text ###
-        combined_image_text = torch.stack([panel_embeddings, panel_image_embeddings],axis=1)
+        combined_image_text = torch.stack([panel_embeddings, panel_image_embeddings],axis=2)
 
-        #need to flatten to get linear + put through
-        input_to_linear = combined_image_text.reshape(batch_size, -1)
-        out_linear = self.linear(input_to_linear)
-        input_image_text = out_linear.reshape(batch_size, n_context, -1)
+        input_to_linear = combined_image_text.reshape(batch_size, n_context, -1)
+        input_image_text = linear(input_to_linear)
+        input_image_text = input_image_text.reshape(batch_size, n_context, -1)
 
         #lstm with both image and text data:
         _, (_, context_embeddings) = self.lstm_panel(input_image_text)
