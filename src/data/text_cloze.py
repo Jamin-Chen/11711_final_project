@@ -95,7 +95,18 @@ class TextClozeDataset(Dataset):
                 vdict=self.word_to_idx,
             )
 
+        self.bert_tokenizer = None
+        self.vit_feature_extractor = None
+
     def __getitem__(self, indices: List[int]) -> List:
+        # Load the tokenizer/extractor if it's our first time.
+        if self.bert_tokenizer is None:
+            self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+        if self.vit_feature_extractor is None:
+            self.vit_feature_extractor = ViTFeatureExtractor.from_pretrained(
+                'google/vit-base-patch16-224-in21k'
+            )
+
         # NOTE: We need to open the hdf5 file inside here in order to ensure thread
         # safety when num_workers > 0.
         with h5.File(self.comics_data_path, 'r') as comics_data:
@@ -103,6 +114,8 @@ class TextClozeDataset(Dataset):
 
             batches = generate_minibatches_from_megabatch_text_cloze(
                 fold_data,
+                self.bert_tokenizer,
+                self.vit_feature_extractor,
                 vdict=self.word_to_idx,
                 mb_start=indices[0],
                 mb_end=indices[-1] + 1,
@@ -150,6 +163,8 @@ def read_fold_text_cloze(csv_file, vdict, max_len=30):
 
 def generate_minibatches_from_megabatch_text_cloze(
     fold_data,
+    bert_tokenizer,
+    vit_feature_extractor,
     vdict,
     mb_start,
     mb_end,
@@ -421,7 +436,6 @@ def generate_minibatches_from_megabatch_text_cloze(
 
         # Encode text as BERT tokens (this step is CPU bound).
         # TODO: Should probably pass this stuff in somehow instead of hardcoding it.
-        bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         tokenize = partial(
             bert_tokenizer,
             return_tensors='pt',
@@ -434,9 +448,6 @@ def generate_minibatches_from_megabatch_text_cloze(
         answer_panel_bert_input = tokenize(answer_panel_text)
 
         # Prepare data for vision transformer.
-        vit_feature_extractor = ViTFeatureExtractor.from_pretrained(
-            'google/vit-base-patch16-224-in21k'
-        )
         do_vit_featurize = partial(vit_feature_extractor, return_tensors='pt')
 
         context_panel_vit_input = None
