@@ -26,6 +26,8 @@ from data.visual_cloze import VisualClozeBatch, VisualClozeDataset
 from models import (
     TextOnlyTextClozeTransformerBaseline,
     TextOnlyVisualClozeTransformerBaseline,
+    ImageTextVisualClozeTransformerBaseline,
+    ImageTextTextClozeTransformerBaseline
 )
 
 
@@ -107,7 +109,7 @@ def train_one_epoch(
     iters_to_accumulate: int = 1,
 ):
     model.train()
-
+    
     total_loss = 0
     n_batches = 0
 
@@ -225,6 +227,10 @@ def main(config: ExperimentConfig):
         model = TextOnlyTextClozeTransformerBaseline()
     elif model_name == 'text_only_visual_cloze':
         model = TextOnlyVisualClozeTransformerBaseline()
+    elif model_name == 'image_and_text_visual_cloze':
+        model = ImageTextVisualClozeTransformerBaseline()
+    elif model_name == 'image_and_text_text_cloze':
+        model = ImageTextTextClozeTransformerBaseline()
     else:
         raise ValueError(f'Unsupported model name: {model_name}.')
 
@@ -274,8 +280,8 @@ def main(config: ExperimentConfig):
         duration = str(timedelta(seconds=end - start)).split('.')[0]
 
         print(
-            f'Epoch {epoch}: {train_loss=:.4f}, {valid_loss=:.4f}, {valid_acc=:.4f}, {test_loss=:.4f}, {test_acc=:.4f}. Took {duration}s.'
-        )
+           f'Epoch {epoch}: {train_loss}, {valid_loss}, {valid_acc}, {test_loss}, {test_acc}. Took {duration}s.'
+       )
 
 
 if __name__ == '__main__':
