@@ -2,29 +2,41 @@ from typing import Dict, List
 
 import torch
 import torch.nn as nn
-from transformers import BertTokenizer, BertModel, DistilBertTokenizer, DistilBertModel
+from transformers import (
+    BertTokenizer,
+    BertModel,
+    DistilBertTokenizer,
+    DistilBertModel,
+    ViTFeatureExtractor,
+    ViTModel,
+)
 
 from data.text_cloze import TextClozeBatch
+from data.visual_cloze import VisualClozeBatch
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-class TextOnlyTextClozeTransformerBaseline(nn.Module):
-    def __init__(self, idx_to_word, use_distilbert=False):
-        super(TextOnlyTextClozeTransformerBaseline, self).__init__()
-
-        self.idx_to_word = idx_to_word
+class TextOnlyVisualClozeTransformerBaseline(nn.Module):
+    def __init__(self, use_distilbert=False):
+        super(TextOnlyVisualClozeTransformerBaseline, self).__init__()
 
         self.use_distilbert = use_distilbert
         if use_distilbert:
             # self.bert_tokenizer = DistilBertTokenizer.from_pretrained(
             #     'distilbert-base-uncased'
             # )
-            self.bert_model = DistilBertModel.from_pretrained('distilbert-base-uncased')
+            self.bert_model = DistilBertModel.from_pretrained(
+                'distilbert-base-uncased'
+            ).to(device)
         else:
             # self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
             self.bert_model = BertModel.from_pretrained('bert-base-uncased').to(device)
+
+        self.vit_model = ViTModel.from_pretrained(
+            'google/vit-base-patch16-224-in21k'
+        ).to(device)
 
         self.lstm_panel = nn.LSTM(
             input_size=768,
@@ -32,22 +44,26 @@ class TextOnlyTextClozeTransformerBaseline(nn.Module):
             batch_first=True,
         )
 
-    def forward(self, batch: TextClozeBatch):
+    def forward(self, batch: VisualClozeBatch):
         batch_size = batch.batch_size
         n_context = batch.n_context
 
         panel_embeddings = self._get_bert_embeddings(batch.context_panel_bert_input)
         panel_embeddings = panel_embeddings.reshape(batch_size, n_context, -1)
 
-        # Answer embeddings.
-        answer_embeddings = self._get_bert_embeddings(batch.answer_panel_bert_input)
-        answer_embeddings = answer_embeddings.reshape(batch_size, 3, -1)
-
         _, (_, context_embeddings) = self.lstm_panel(panel_embeddings)
         context_embeddings = context_embeddings.reshape(batch_size, -1, 1)
 
+        # Answer embeddings.
+        answer_panel_image_embeddings = self._get_visual_embeddings(
+            batch.answer_panel_vit_input
+        )
+        answer_panel_image_embeddings = answer_panel_image_embeddings.reshape(
+            batch_size, 3, -1
+        )
+
         # TODO: try cosine simlarity as well
-        scores = torch.bmm(answer_embeddings, context_embeddings)
+        scores = torch.bmm(answer_panel_image_embeddings, context_embeddings)
         scores = scores.reshape(batch_size, 3)
 
         return scores
@@ -64,3 +80,10 @@ class TextOnlyTextClozeTransformerBaseline(nn.Module):
                 :, 0
             ]  # Distilbert returns a tuple where the 1st thing is hidden state.
         return bert_outputs.pooler_output
+
+    def _get_visual_embeddings(self, vit_input: Dict):
+        for key, tensor in vit_input.items():
+            if isinstance(tensor, torch.Tensor):
+                vit_input[key] = tensor.to(device, non_blocking=True)
+        vit_outputs = self.vit_model(**vit_input)
+        return vit_outputs.pooler_output
