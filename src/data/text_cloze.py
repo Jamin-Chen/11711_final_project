@@ -11,6 +11,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from transformers import BertTokenizer, ViTFeatureExtractor
+from autocorrect import Speller
+
 
 
 @dataclass
@@ -197,6 +199,8 @@ def generate_minibatches_from_megabatch_text_cloze(
     word_mask = fold_data['word_mask']
     raw_text = fold_data['raw_text']
 
+#     torch.save(raw_text, "raw_text.pt")
+    
     # binarize bounding box mask (no narrative box distinction)
     curr_bmask_raw = bbox_mask[mb_start:mb_end]
     curr_bmask = np.clip(curr_bmask_raw, 0, 1)
@@ -229,6 +233,9 @@ def generate_minibatches_from_megabatch_text_cloze(
     context_images = []
     candidates = []
     a_txt = []
+    
+    #create speller object
+    spell = Speller(fast=True)
 
     iter_end = num_panels.shape[0] - 1
     for i in range(0, iter_end):
@@ -268,6 +275,7 @@ def generate_minibatches_from_megabatch_text_cloze(
 
             # I (Jamin) added:
             context_raw_text.append(curr_raw_text[i, j : j + context_size])
+            torch.save(curr_raw_text[i, j : j + context_size], "current text.pt")
             if load_image_feats:
                 context_images.append(curr_images[i, j : j + context_size])
 
@@ -418,13 +426,19 @@ def generate_minibatches_from_megabatch_text_cloze(
         # Convert raw sentences to flat lists instead of numpy arrays.
         context_panel_text = c_txt.ravel().tolist()
         answer_panel_text = a_txt.ravel().tolist()
+        
+        #spell correct
+        answer_panel_text =  [spell(word) for word in answer_panel_text]
 
         # Combine the text boxes within each panel into a single string.
-        context_panel_text = [
+        old_context_panel_text = [
             ' '.join(context_panel_text[i : i + 3])
             for i in range(0, len(context_panel_text), 3)
         ]
 
+        #corrected spelling
+        context_panel_text = [spell(word) for word in old_context_panel_text]
+        
         # Assert shapes are correct before we encode with BERT tokenizer.
         # The true batch size (which can be smaller).
         true_batch_size = min(end, len(candidates)) - start
