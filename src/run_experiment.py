@@ -59,6 +59,7 @@ def make_dataloader(
     batch_size: int,
     num_workers: int,
     pin_memory: bool,
+    do_spell_check: bool,
 ):
     # Names are:
     # text_only_text_cloze
@@ -79,6 +80,7 @@ def make_dataloader(
         fold=fold,
         batch_size=batch_size,
         load_image_feats=load_image_feats,
+        do_spell_check=do_spell_check,
     )
 
     # We use SequentialSampler because the original code did not shuffle example order,

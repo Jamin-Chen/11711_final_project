@@ -10,6 +10,7 @@ class DataConfig:
     megabatch_size: int
     num_workers: int
     pin_memory: bool
+    do_spell_check: bool
 
 
 @dataclass

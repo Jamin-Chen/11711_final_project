@@ -6,3 +6,4 @@ folds_dir: '../11711_COMICS/folds'
 megabatch_size: 512
 num_workers: 4
 pin_memory: true
+do_spell_check: false

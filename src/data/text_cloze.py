@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Dict, List, Optional
 
+from autocorrect import Speller
 import h5py as h5
 import numpy as np
 import torch
@@ -65,6 +66,7 @@ class TextClozeDataset(Dataset):
         fold: str,
         batch_size: int,
         load_image_feats: bool,
+        do_spell_check: bool,
     ):
         assert fold in ('train', 'dev', 'test')
         self.comics_data_path = comics_data_path
@@ -75,6 +77,7 @@ class TextClozeDataset(Dataset):
         self.fold = fold
         self.batch_size = batch_size
         self.load_image_feats = load_image_feats
+        self.do_spell_check = do_spell_check
 
         # NOTE: Need to pass bytes as the encoding scheme here, there seems to be some
         # incompability between python 2/3 pickle. However this means that all strings
@@ -97,6 +100,7 @@ class TextClozeDataset(Dataset):
 
         self.bert_tokenizer = None
         self.vit_feature_extractor = None
+        self.speller = None
 
     def __getitem__(self, indices: List[int]) -> List:
         # Load the tokenizer/extractor if it's our first time.
@@ -106,6 +110,8 @@ class TextClozeDataset(Dataset):
             self.vit_feature_extractor = ViTFeatureExtractor.from_pretrained(
                 'google/vit-base-patch16-224-in21k'
             )
+        if self.speller is None and self.do_spell_check:
+            self.speller = Speller(fast=True)
 
         # NOTE: We need to open the hdf5 file inside here in order to ensure thread
         # safety when num_workers > 0.
@@ -116,6 +122,7 @@ class TextClozeDataset(Dataset):
                 fold_data,
                 self.bert_tokenizer,
                 self.vit_feature_extractor,
+                self.speller,
                 vdict=self.word_to_idx,
                 mb_start=indices[0],
                 mb_end=indices[-1] + 1,
@@ -165,6 +172,7 @@ def generate_minibatches_from_megabatch_text_cloze(
     fold_data,
     bert_tokenizer,
     vit_feature_extractor,
+    speller: Optional[Speller],
     vdict,
     mb_start,
     mb_end,
@@ -424,6 +432,11 @@ def generate_minibatches_from_megabatch_text_cloze(
             ' '.join(context_panel_text[i : i + 3])
             for i in range(0, len(context_panel_text), 3)
         ]
+
+        # Do spell checking.
+        if speller is not None:
+            context_panel_text = [speller(txt) for txt in context_panel_text]
+            answer_panel_text = [speller(txt) for txt in answer_panel_text]
 
         # Assert shapes are correct before we encode with BERT tokenizer.
         # The true batch size (which can be smaller).
