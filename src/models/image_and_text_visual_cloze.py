@@ -67,7 +67,7 @@ class ImageTextVisualClozeTransformerBaseline(nn.Module):
         combined_image_text = torch.stack([panel_embeddings, panel_image_embeddings],axis=2)
 
         input_to_linear = combined_image_text.reshape(batch_size, n_context, -1)
-        input_image_text = linear(input_to_linear)
+        input_image_text = self.linear(input_to_linear)
         input_image_text = input_image_text.reshape(batch_size, n_context, -1)
 
         #lstm with both image and text data:
