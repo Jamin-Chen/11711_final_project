@@ -153,7 +153,7 @@ def train_one_epoch(
             pbar.update(pbar_step)
 
     avg_loss = total_loss / n_batches
-    return avg_loss, c_counter
+    return avg_loss
 
 
 def eval_one_epoch(
@@ -204,7 +204,7 @@ def eval_one_epoch(
         n_examples = all_preds.size(0)
         acc = (torch.sum(all_preds == all_labels) / n_examples).item()
 
-        return avg_loss, acc, all_preds, all_labels, loss_func
+        return avg_loss, acc, all_preds, all_labels
 
 
 @hydra.main(config_path='../conf', config_name='default')
@@ -270,7 +270,7 @@ def main(config: ExperimentConfig):
     for epoch in range(n_epochs):
         start = time.time()
 
-        train_loss, loss_func = train_one_epoch(
+        train_loss = train_one_epoch(
             model,
             train_dataloader,
             optimizer,
@@ -281,7 +281,7 @@ def main(config: ExperimentConfig):
             pbar_desc='Train pages',
             iters_to_accumulate=iters_to_accumulate,
         )
-        valid_loss, valid_acc, _, _, loss_func = eval_one_epoch(
+        valid_loss, valid_acc, _, _ = eval_one_epoch(
             model,
             valid_dataloader,
             loss_func,
@@ -289,7 +289,7 @@ def main(config: ExperimentConfig):
             pbar_step=megabatch_size,
             pbar_desc='Valid. pages',
         )
-        test_loss, test_acc, test_preds, test_labels, loss_func = eval_one_epoch(
+        test_loss, test_acc, test_preds, test_labels = eval_one_epoch(
             model,
             test_dataloader,
             loss_func,
