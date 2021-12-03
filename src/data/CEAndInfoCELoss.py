@@ -13,18 +13,26 @@ def calculate_similarities(
 
     # cosine similarities
     cosine_sim = torch.nn.CosineSimilarity(dim=3)
-    similarities = cosine_sim(answer_emb.unsqueeze(1), context_emb.unsqueeze(2))
+    # TODO: Is this the right order to unsqueeze dimensions? Think about this more.
+    similarities = cosine_sim(answer_emb.unsqueeze(2), context_emb.unsqueeze(1))
 
     # masks
-    correct = torch.zeros(batch_size, n_context).to(device).bool()
+    correct = torch.zeros(batch_size, n_context).to(device)
     correct[np.arange(len(correct)), labels] = 1
-    incorrect = correct == False
+
+    # For some reason, doing incorrect = correct == False leads to NaN in backwards.
+    incorrect = torch.zeros_like(correct).to(device)
+    incorrect[np.arange(len(correct)), ~labels] = 1
 
     # calculate terms
     max_values = -1 * ((C * similarities).sum(axis=-1) * correct).sum(axis=-1).sum()
-    min_values = torch.log(
-        ((torch.e ** (C * similarities)).sum(axis=-1) * incorrect).sum(axis=1)
-    ).sum()
+
+    # Flatten dimensions 1 and 2 together before applying logsumexp.
+    min_values = torch.logsumexp(
+        (C * similarities * incorrect.detach().unsqueeze(2)).view(batch_size, -1), axis=-1
+    )
+    # Sum over examples in batch.
+    min_values = min_values.sum()
 
     # combine terms
     final_loss = (
