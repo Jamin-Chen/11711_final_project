@@ -40,7 +40,7 @@ class CEAndInfoCELoss(nn.Module):
 
         # annealing C values
         self.n_batches = 0
-        self.ramp_up = 1000
+        self.ramp_up = 10000
         self.sqrt_d = np.sqrt(768)
 
         self.lambda_ = lambda_
