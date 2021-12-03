@@ -65,9 +65,7 @@ class NegativeLogProbabilityLoss(_Loss):
         #losses
         primary_loss = F.cross_entropy(logits, labels)
         
-        print(primary_loss)
         aux_loss = auxiliary_loss(labels, context_emb, answer_emb, self.C)
-        print(aux_loss)
         
         #get the weights of the losses
         return primary_loss * (self.weight) + aux_loss * (1 - self.weight)
