@@ -1,2 +1,3 @@
 from .text_only_text_cloze import TextOnlyTextClozeTransformerBaseline
 from .text_only_visual_cloze import TextOnlyVisualClozeTransformerBaseline
+from .image_text_text_cloze import ImageTextTextClozeTransformerBaseline

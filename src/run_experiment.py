@@ -26,6 +26,7 @@ from data.visual_cloze import VisualClozeBatch, VisualClozeDataset
 from models import (
     TextOnlyTextClozeTransformerBaseline,
     TextOnlyVisualClozeTransformerBaseline,
+    ImageTextTextClozeTransformerBaseline,
 )
 
 
@@ -227,6 +228,8 @@ def main(config: ExperimentConfig):
         model = TextOnlyTextClozeTransformerBaseline()
     elif model_name == 'text_only_visual_cloze':
         model = TextOnlyVisualClozeTransformerBaseline()
+    elif model_name == 'image_text_text_cloze':
+        model = ImageTextTextClozeTransformerBaseline()
     else:
         raise ValueError(f'Unsupported model name: {model_name}.')
 

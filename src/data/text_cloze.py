@@ -408,7 +408,7 @@ def generate_minibatches_from_megabatch_text_cloze(
                 a_wm[idx] = a_wm[idx, p]
                 labels[idx] = labels[idx, p]
                 a_txt[idx] = a_txt[idx, p]
-        
+
         # Convert context panels to list of numpy arrays.
         if load_image_feats:
             context_panel_images = context_panel_images.reshape(-1, 224, 224, 3)
