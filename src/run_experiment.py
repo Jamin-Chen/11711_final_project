@@ -21,6 +21,8 @@ from tqdm import tqdm
 from config import ExperimentConfig
 from data.text_cloze import TextClozeBatch, TextClozeDataset
 from data.visual_cloze import VisualClozeBatch, VisualClozeDataset
+from data.NLPLLoss import NLPLLoss
+
 
 # from models.lstm import TextOnlyHeirarchicalLSTM
 from models import (
@@ -104,6 +106,8 @@ def train_one_epoch(
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     scaler,
+    loss_weight: float,
+    loss_c: float,
     pbar_total: int,
     pbar_step: int,
     pbar_desc: str,
@@ -121,9 +125,9 @@ def train_one_epoch(
                 labels = labels.to(device, non_blocking=True)
 
                 with torch.cuda.amp.autocast():
-                    logits = model(batch)
+                    logits, context_emb, answer_emb = model(batch)
 
-                loss = F.cross_entropy(logits, labels)
+                loss = NLPLLoss(C=loss_c, weight=loss_weight)(logits=logits, labels=labels, context_emb=context_emb, answer_emb=answer_emb)
                 loss /= iters_to_accumulate
 
                 total_loss += loss.item()
@@ -148,6 +152,8 @@ def train_one_epoch(
 def eval_one_epoch(
     model: nn.Module,
     dataloader: DataLoader,
+    loss_weight: float,
+    loss_c: float,
     pbar_total: int,
     pbar_step: int,
     pbar_desc: str,
@@ -167,9 +173,9 @@ def eval_one_epoch(
                     labels = labels.to(device, non_blocking=True)
 
                     with torch.cuda.amp.autocast():
-                        logits = model(batch)
+                        logits, context_emb, answer_emb = model(batch)
 
-                    loss = F.cross_entropy(logits, labels)
+                    loss = NLPLLoss(C=loss_c, weight=loss_weight)(logits=logits, labels=labels, context_emb=context_emb, answer_emb=answer_emb)
 
                     preds = torch.argmax(logits, dim=-1)
                     all_preds.append(preds.cpu())
@@ -198,6 +204,8 @@ def main(config: ExperimentConfig):
     lr = config.model.lr
     iters_to_accumulate = config.model.iters_to_accumulate
     model_name = config.model.name
+    loss_weight = config.model.loss_weight
+    loss_c = config.model.loss_c
 
     # NOTE: Need to pass bytes as the encoding scheme here, there seems to be some
     # incompability between python 2/3 pickle. For more info see:
@@ -249,12 +257,14 @@ def main(config: ExperimentConfig):
 
     for epoch in range(n_epochs):
         start = time.time()
-
+        
         train_loss = train_one_epoch(
             model,
             train_dataloader,
             optimizer,
             scaler,
+            loss_weight,
+            loss_c,
             pbar_total=n_train_pages,
             pbar_step=megabatch_size,
             pbar_desc='Train pages',
@@ -263,6 +273,8 @@ def main(config: ExperimentConfig):
         valid_loss, valid_acc, _, _ = eval_one_epoch(
             model,
             valid_dataloader,
+            loss_weight,
+            loss_c,
             pbar_total=n_valid_pages,
             pbar_step=megabatch_size,
             pbar_desc='Valid. pages',
@@ -270,17 +282,23 @@ def main(config: ExperimentConfig):
         test_loss, test_acc, test_preds, test_labels = eval_one_epoch(
             model,
             test_dataloader,
+            loss_weight,
+            loss_c,
             pbar_total=n_test_pages,
             pbar_step=megabatch_size,
             pbar_desc='Test Pages',
         )
+
 
         end = time.time()
         duration = str(timedelta(seconds=end - start)).split('.')[0]
 
         print(
             f'Epoch {epoch}: {train_loss=:.4f}, {valid_loss=:.4f}, {valid_acc=:.4f}, {test_loss=:.4f}, {test_acc=:.4f}. Took {duration}s.'
-        )
+        )        
+#         print(
+#            f'Epoch {epoch}: {train_loss}, {valid_loss}, {valid_acc}, {test_loss}, {test_acc}. Took {duration}s.'
+#        )
 
 
 if __name__ == '__main__':
