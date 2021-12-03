@@ -35,22 +35,34 @@ def calculate_similarities(
 
 
 class CEAndInfoCELoss(nn.Module):
-    def __init__(self, C=0.1, lambda_=0.5, device='cuda'):
+    def __init__(self, lambda_=0.5, device='cuda'):
         super(CEAndInfoCELoss, self).__init__()
 
-        self.C = C
+        # annealing C values
+        self.n_batches = 0
+        self.ramp_up = 1000
+        self.sqrt_d = np.sqrt(768)
+
         self.lambda_ = lambda_
         self.device = device
 
-    def forward(self, logits, labels, context_emb, answer_emb):
+    def forward(self, logits, labels, context_emb, answer_emb, train=True):
         batch_size = labels.shape[0]
+
+        # calculate C:
+        # for every batch up to 10K training batches, will get closer and closer to sqrt d from 0 (until it is perpetually at sqrt(d).
+        loss_c = min(self.n_batches / self.ramp_up, 1) * self.sqrt_d
 
         # losses
         ce_loss = F.cross_entropy(logits, labels)
 
         info_ce_loss = calculate_similarities(
-            answer_emb, context_emb, labels, self.C, batch_size, self.device
+            answer_emb, context_emb, labels, loss_c, batch_size, self.device
         )
+
+        if train:
+            # update counter
+            self.n_batches += 1
 
         # get the weights of the losses
         return ce_loss * (self.lambda_) + info_ce_loss * (1 - self.lambda_)

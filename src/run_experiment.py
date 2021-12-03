@@ -106,18 +106,13 @@ def train_one_epoch(
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     scaler,
-    c_counter: int,
-    loss_lambda: float,
+    loss_func,
     pbar_total: int,
     pbar_step: int,
     pbar_desc: str,
     iters_to_accumulate: int = 1,
 ):
     model.train()
-
-    # constants for C annealing term:
-    c_ramp_up = 10000
-    sqrt_d = np.sqrt(768)
 
     total_loss = 0
     n_batches = 0
@@ -126,26 +121,20 @@ def train_one_epoch(
         for batches in dataloader:
             for batch, labels in batches:
 
-                # for every batch up to 10K training batches, will get closer and closer to sqrt d from 0 (until it is perpetually at sqrt(d).
-                if c_counter <= c_ramp_up:
-                    loss_c = (c_counter / c_ramp_up) * sqrt_d
-                    c_counter += 1
-
-                else:
-                    loss_c = sqrt_d
-
                 batch.to(device, non_blocking=True)
                 labels = labels.to(device, non_blocking=True)
 
                 with torch.cuda.amp.autocast():
                     logits, context_emb, answer_emb = model(batch)
 
-                loss = CEAndInfoCELoss(C=loss_c, lambda_=loss_lambda)(
+                loss = loss_func(
                     logits=logits,
                     labels=labels,
                     context_emb=context_emb,
                     answer_emb=answer_emb,
+                    train=True,
                 )
+
                 loss /= iters_to_accumulate
 
                 total_loss += loss.item()
@@ -170,7 +159,7 @@ def train_one_epoch(
 def eval_one_epoch(
     model: nn.Module,
     dataloader: DataLoader,
-    loss_lambda: float,
+    loss_func,
     pbar_total: int,
     pbar_step: int,
     pbar_desc: str,
@@ -192,11 +181,12 @@ def eval_one_epoch(
                     with torch.cuda.amp.autocast():
                         logits, context_emb, answer_emb = model(batch)
 
-                    loss = CEAndInfoCELoss(C=loss_c, lambda_=loss_lambda)(
+                    loss = loss_func(
                         logits=logits,
                         labels=labels,
                         context_emb=context_emb,
                         answer_emb=answer_emb,
+                        train=False,
                     )
 
                     preds = torch.argmax(logits, dim=-1)
@@ -214,7 +204,7 @@ def eval_one_epoch(
         n_examples = all_preds.size(0)
         acc = (torch.sum(all_preds == all_labels) / n_examples).item()
 
-        return avg_loss, acc, all_preds, all_labels
+        return avg_loss, acc, all_preds, all_labels, loss_func
 
 
 @hydra.main(config_path='../conf', config_name='default')
@@ -249,9 +239,6 @@ def main(config: ExperimentConfig):
     n_valid_pages = len(valid_dataset)
     n_test_pages = len(test_dataset)
 
-    # annealing value (C) [Henderson et al., 2020]
-    c_counter = -1
-
     # Predefined parameters.
     # total_pages, max_panels, max_boxes, max_words = train_data.words.shape
     vocab_len = len(word_to_idx)
@@ -278,34 +265,34 @@ def main(config: ExperimentConfig):
     print(f'Using an effective batch size of {effective_batch_size}.')
 
     optimizer = optim.Adam(model.parameters(), lr=lr)
+    loss_func = CEAndInfoCELoss(lambda_=loss_lambda)
 
     for epoch in range(n_epochs):
         start = time.time()
 
-        train_loss, c_counter = train_one_epoch(
+        train_loss, loss_func = train_one_epoch(
             model,
             train_dataloader,
             optimizer,
             scaler,
-            c_counter,
-            loss_lambda,
+            loss_func,
             pbar_total=n_train_pages,
             pbar_step=megabatch_size,
             pbar_desc='Train pages',
             iters_to_accumulate=iters_to_accumulate,
         )
-        valid_loss, valid_acc, _, _ = eval_one_epoch(
+        valid_loss, valid_acc, _, _, loss_func = eval_one_epoch(
             model,
             valid_dataloader,
-            loss_lambda,
+            loss_func,
             pbar_total=n_valid_pages,
             pbar_step=megabatch_size,
             pbar_desc='Valid. pages',
         )
-        test_loss, test_acc, test_preds, test_labels = eval_one_epoch(
+        test_loss, test_acc, test_preds, test_labels, loss_func = eval_one_epoch(
             model,
             test_dataloader,
-            loss_lambda,
+            loss_func,
             pbar_total=n_test_pages,
             pbar_step=megabatch_size,
             pbar_desc='Test Pages',
@@ -313,6 +300,7 @@ def main(config: ExperimentConfig):
 
         end = time.time()
         duration = str(timedelta(seconds=end - start)).split('.')[0]
+
 
         print(
             f'Epoch {epoch}: {train_loss=:.4f}, {valid_loss=:.4f}, {valid_acc=:.4f}, {test_loss=:.4f}, {test_acc=:.4f}. Took {duration}s.'
