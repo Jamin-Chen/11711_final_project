@@ -21,6 +21,8 @@ from tqdm import tqdm
 from config import ExperimentConfig
 from data.text_cloze import TextClozeBatch, TextClozeDataset
 from data.visual_cloze import VisualClozeBatch, VisualClozeDataset
+from data.CEAndInfoCELoss import CEAndInfoCELoss
+
 
 # from models.lstm import TextOnlyHeirarchicalLSTM
 from models import (
@@ -104,6 +106,7 @@ def train_one_epoch(
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     scaler,
+    loss_func,
     pbar_total: int,
     pbar_step: int,
     pbar_desc: str,
@@ -117,13 +120,21 @@ def train_one_epoch(
     with tqdm(leave=False, total=pbar_total, desc=pbar_desc) as pbar:
         for batches in dataloader:
             for batch, labels in batches:
+
                 batch.to(device, non_blocking=True)
                 labels = labels.to(device, non_blocking=True)
 
                 with torch.cuda.amp.autocast():
-                    logits = model(batch)
+                    logits, context_emb, answer_emb = model(batch)
 
-                loss = F.cross_entropy(logits, labels)
+                loss = loss_func(
+                    logits=logits,
+                    labels=labels,
+                    context_emb=context_emb,
+                    answer_emb=answer_emb,
+                    train=True,
+                )
+
                 loss /= iters_to_accumulate
 
                 total_loss += loss.item()
@@ -148,6 +159,7 @@ def train_one_epoch(
 def eval_one_epoch(
     model: nn.Module,
     dataloader: DataLoader,
+    loss_func,
     pbar_total: int,
     pbar_step: int,
     pbar_desc: str,
@@ -167,9 +179,15 @@ def eval_one_epoch(
                     labels = labels.to(device, non_blocking=True)
 
                     with torch.cuda.amp.autocast():
-                        logits = model(batch)
+                        logits, context_emb, answer_emb = model(batch)
 
-                    loss = F.cross_entropy(logits, labels)
+                    loss = loss_func(
+                        logits=logits,
+                        labels=labels,
+                        context_emb=context_emb,
+                        answer_emb=answer_emb,
+                        train=False,
+                    )
 
                     preds = torch.argmax(logits, dim=-1)
                     all_preds.append(preds.cpu())
@@ -198,6 +216,7 @@ def main(config: ExperimentConfig):
     lr = config.model.lr
     iters_to_accumulate = config.model.iters_to_accumulate
     model_name = config.model.name
+    loss_lambda = config.model.loss_lambda
 
     # NOTE: Need to pass bytes as the encoding scheme here, there seems to be some
     # incompability between python 2/3 pickle. For more info see:
@@ -246,6 +265,7 @@ def main(config: ExperimentConfig):
     print(f'Using an effective batch size of {effective_batch_size}.')
 
     optimizer = optim.Adam(model.parameters(), lr=lr)
+    loss_func = CEAndInfoCELoss(lambda_=loss_lambda)
 
     for epoch in range(n_epochs):
         start = time.time()
@@ -255,6 +275,7 @@ def main(config: ExperimentConfig):
             train_dataloader,
             optimizer,
             scaler,
+            loss_func,
             pbar_total=n_train_pages,
             pbar_step=megabatch_size,
             pbar_desc='Train pages',
@@ -263,6 +284,7 @@ def main(config: ExperimentConfig):
         valid_loss, valid_acc, _, _ = eval_one_epoch(
             model,
             valid_dataloader,
+            loss_func,
             pbar_total=n_valid_pages,
             pbar_step=megabatch_size,
             pbar_desc='Valid. pages',
@@ -270,6 +292,7 @@ def main(config: ExperimentConfig):
         test_loss, test_acc, test_preds, test_labels = eval_one_epoch(
             model,
             test_dataloader,
+            loss_func,
             pbar_total=n_test_pages,
             pbar_step=megabatch_size,
             pbar_desc='Test Pages',
@@ -277,6 +300,7 @@ def main(config: ExperimentConfig):
 
         end = time.time()
         duration = str(timedelta(seconds=end - start)).split('.')[0]
+
 
         print(
             f'Epoch {epoch}: {train_loss=:.4f}, {valid_loss=:.4f}, {valid_acc=:.4f}, {test_loss=:.4f}, {test_acc=:.4f}. Took {duration}s.'

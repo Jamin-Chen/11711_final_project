@@ -4,3 +4,4 @@ n_epochs: 10
 batch_size: 16
 iters_to_accumulate: 4
 lr: 1.0e-5
+loss_lambda: 0.5

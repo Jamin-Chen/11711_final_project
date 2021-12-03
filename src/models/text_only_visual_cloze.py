@@ -66,7 +66,7 @@ class TextOnlyVisualClozeTransformerBaseline(nn.Module):
         scores = torch.bmm(answer_panel_image_embeddings, context_embeddings)
         scores = scores.reshape(batch_size, 3)
 
-        return scores
+        return scores, panel_embeddings, answer_embeddings
 
     def _get_bert_embeddings(self, bert_input: Dict):
         for key, tensor in bert_input.items():
