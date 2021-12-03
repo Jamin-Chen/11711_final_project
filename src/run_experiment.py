@@ -21,7 +21,7 @@ from tqdm import tqdm
 from config import ExperimentConfig
 from data.text_cloze import TextClozeBatch, TextClozeDataset
 from data.visual_cloze import VisualClozeBatch, VisualClozeDataset
-from data.NLPLLoss import NLPLLoss
+from data.CEAndInfoCELoss import CEAndInfoCELoss
 
 
 # from models.lstm import TextOnlyHeirarchicalLSTM
@@ -106,8 +106,8 @@ def train_one_epoch(
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     scaler,
-    loss_weight: float,
-    loss_c: float,
+    c_counter: int,
+    loss_lambda: float,
     pbar_total: int,
     pbar_step: int,
     pbar_desc: str,
@@ -115,19 +115,37 @@ def train_one_epoch(
 ):
     model.train()
 
+    # constants for C annealing term:
+    c_ramp_up = 10000
+    sqrt_d = np.sqrt(768)
+
     total_loss = 0
     n_batches = 0
 
     with tqdm(leave=False, total=pbar_total, desc=pbar_desc) as pbar:
         for batches in dataloader:
             for batch, labels in batches:
+
+                # for every batch up to 10K training batches, will get closer and closer to sqrt d from 0 (until it is perpetually at sqrt(d).
+                if c_counter <= c_ramp_up:
+                    loss_c = (c_counter / c_ramp_up) * sqrt_d
+                    c_counter += 1
+
+                else:
+                    loss_c = sqrt_d
+
                 batch.to(device, non_blocking=True)
                 labels = labels.to(device, non_blocking=True)
 
                 with torch.cuda.amp.autocast():
                     logits, context_emb, answer_emb = model(batch)
 
-                loss = NLPLLoss(C=loss_c, weight=loss_weight)(logits=logits, labels=labels, context_emb=context_emb, answer_emb=answer_emb)
+                loss = CEAndInfoCELoss(C=loss_c, lambda_=loss_lambda)(
+                    logits=logits,
+                    labels=labels,
+                    context_emb=context_emb,
+                    answer_emb=answer_emb,
+                )
                 loss /= iters_to_accumulate
 
                 total_loss += loss.item()
@@ -146,14 +164,13 @@ def train_one_epoch(
             pbar.update(pbar_step)
 
     avg_loss = total_loss / n_batches
-    return avg_loss
+    return avg_loss, c_counter
 
 
 def eval_one_epoch(
     model: nn.Module,
     dataloader: DataLoader,
-    loss_weight: float,
-    loss_c: float,
+    loss_lambda: float,
     pbar_total: int,
     pbar_step: int,
     pbar_desc: str,
@@ -175,7 +192,12 @@ def eval_one_epoch(
                     with torch.cuda.amp.autocast():
                         logits, context_emb, answer_emb = model(batch)
 
-                    loss = NLPLLoss(C=loss_c, weight=loss_weight)(logits=logits, labels=labels, context_emb=context_emb, answer_emb=answer_emb)
+                    loss = CEAndInfoCELoss(C=loss_c, lambda_=loss_lambda)(
+                        logits=logits,
+                        labels=labels,
+                        context_emb=context_emb,
+                        answer_emb=answer_emb,
+                    )
 
                     preds = torch.argmax(logits, dim=-1)
                     all_preds.append(preds.cpu())
@@ -204,8 +226,7 @@ def main(config: ExperimentConfig):
     lr = config.model.lr
     iters_to_accumulate = config.model.iters_to_accumulate
     model_name = config.model.name
-    loss_weight = config.model.loss_weight
-    loss_c = config.model.loss_c
+    loss_lambda = config.model.loss_lambda
 
     # NOTE: Need to pass bytes as the encoding scheme here, there seems to be some
     # incompability between python 2/3 pickle. For more info see:
@@ -227,6 +248,9 @@ def main(config: ExperimentConfig):
     n_train_pages = len(train_dataset)
     n_valid_pages = len(valid_dataset)
     n_test_pages = len(test_dataset)
+
+    # annealing value (C) [Henderson et al., 2020]
+    c_counter = -1
 
     # Predefined parameters.
     # total_pages, max_panels, max_boxes, max_words = train_data.words.shape
@@ -257,14 +281,14 @@ def main(config: ExperimentConfig):
 
     for epoch in range(n_epochs):
         start = time.time()
-        
-        train_loss = train_one_epoch(
+
+        train_loss, c_counter = train_one_epoch(
             model,
             train_dataloader,
             optimizer,
             scaler,
-            loss_weight,
-            loss_c,
+            c_counter,
+            loss_lambda,
             pbar_total=n_train_pages,
             pbar_step=megabatch_size,
             pbar_desc='Train pages',
@@ -273,8 +297,7 @@ def main(config: ExperimentConfig):
         valid_loss, valid_acc, _, _ = eval_one_epoch(
             model,
             valid_dataloader,
-            loss_weight,
-            loss_c,
+            loss_lambda,
             pbar_total=n_valid_pages,
             pbar_step=megabatch_size,
             pbar_desc='Valid. pages',
@@ -282,23 +305,18 @@ def main(config: ExperimentConfig):
         test_loss, test_acc, test_preds, test_labels = eval_one_epoch(
             model,
             test_dataloader,
-            loss_weight,
-            loss_c,
+            loss_lambda,
             pbar_total=n_test_pages,
             pbar_step=megabatch_size,
             pbar_desc='Test Pages',
         )
-
 
         end = time.time()
         duration = str(timedelta(seconds=end - start)).split('.')[0]
 
         print(
             f'Epoch {epoch}: {train_loss=:.4f}, {valid_loss=:.4f}, {valid_acc=:.4f}, {test_loss=:.4f}, {test_acc=:.4f}. Took {duration}s.'
-        )        
-#         print(
-#            f'Epoch {epoch}: {train_loss}, {valid_loss}, {valid_acc}, {test_loss}, {test_acc}. Took {duration}s.'
-#        )
+        )
 
 
 if __name__ == '__main__':
